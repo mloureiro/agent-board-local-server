@@ -1,0 +1,5 @@
+{
+  "repository": "mloureiro/agent-board",
+  "commit": "5127f96be50dd4c11fce7e750ccc97ec291384e9",
+  "reason": "Head of spike/bun-compile on the fork: upstream ec516f4 plus the pglite:// database URL, HOST and PGLITE_ASSETS_DIR, none of which upstream has."
+}

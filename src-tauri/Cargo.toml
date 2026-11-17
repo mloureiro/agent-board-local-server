@@ -1,0 +1,22 @@
+[package]
+name = "agent-board-local-server"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "agent_board_local_server"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

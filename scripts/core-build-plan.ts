@@ -10,6 +10,7 @@ export const REQUIRED_TOOLS = ['git', 'pnpm', 'bun'] as const;
 export interface CoreBuild {
   commit: string;
   bun: string;
+  recipe: string;
   files: Record<string, string>;
 }
 
@@ -33,27 +34,44 @@ export const stagedBinaries = {
   cli: `binaries/board-${TARGET_TRIPLE}`,
 };
 
-export const missingTools = (found: Record<(typeof REQUIRED_TOOLS)[number], boolean>): string[] =>
-  REQUIRED_TOOLS.filter((tool) => !found[tool]);
+export type ToolAvailability = Record<(typeof REQUIRED_TOOLS)[number], boolean>;
+
+export const missingTools = (found: ToolAvailability): string[] => REQUIRED_TOOLS.filter((tool) => !found[tool]);
+
+export const parsePinnedBun = (miseToml: string): string | null =>
+  /^\s*bun\s*=\s*"([^"]+)"\s*$/m.exec(miseToml)?.[1] ?? null;
+
+export function bunVersionError(pinned: string | null, actual: string): string | null {
+  if (pinned === null) return 'The core pins no Bun version in mise.toml under [tools]';
+  if (pinned === actual) return null;
+  return `The core pins Bun ${pinned} but this machine has Bun ${actual}; install Bun ${pinned} to build it`;
+}
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 export function parseCoreBuild(value: unknown): CoreBuild | null {
   if (!isRecord(value)) return null;
-  const { commit, bun, files } = value;
-  if (typeof commit !== 'string' || typeof bun !== 'string' || !isRecord(files)) return null;
+  const { commit, bun, recipe, files } = value;
+  if (typeof commit !== 'string' || typeof bun !== 'string' || typeof recipe !== 'string' || !isRecord(files))
+    return null;
   const entries = Object.entries(files);
   if (!entries.every((entry): entry is [string, string] => typeof entry[1] === 'string')) return null;
-  return { commit, bun, files: Object.fromEntries(entries) };
+  return { commit, bun, recipe, files: Object.fromEntries(entries) };
 }
 
 export function isBuildCurrent(
   recorded: CoreBuild | null,
-  expected: { commit: string; bun: string },
+  expected: { commit: string; bun: string; recipe: string },
   actualFiles: Record<string, string>,
 ): boolean {
-  if (recorded === null || recorded.commit !== expected.commit || recorded.bun !== expected.bun) return false;
+  if (
+    recorded === null ||
+    recorded.commit !== expected.commit ||
+    recorded.bun !== expected.bun ||
+    recorded.recipe !== expected.recipe
+  )
+    return false;
   const recordedPaths = Object.keys(recorded.files);
   if (recordedPaths.length === 0 || recordedPaths.length !== Object.keys(actualFiles).length) return false;
   return recordedPaths.every((path) => recorded.files[path] === actualFiles[path]);

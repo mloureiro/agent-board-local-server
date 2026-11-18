@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { isBuildCurrent, missingTools, parseCoreBuild, stagingPlan, stagedBinaries } from './core-build-plan.ts';
+import {
+  bunVersionError,
+  isBuildCurrent,
+  missingTools,
+  parsePinnedBun,
+  parseCoreBuild,
+  stagingPlan,
+  stagedBinaries,
+} from './core-build-plan.ts';
 
-const expected = { commit: 'a'.repeat(40), bun: '1.2.18' };
+const expected = { commit: 'a'.repeat(40), bun: '1.2.18', recipe: 'r1' };
 const files = { 'binaries/board': 'h1', 'resources/drizzle/0000.sql': 'h2' };
 
 describe('isBuildCurrent', () => {
@@ -11,6 +19,7 @@ describe('isBuildCurrent', () => {
 
   it.each([
     ['another core commit', { ...expected, commit: 'b'.repeat(40), files }, files],
+    ['another build recipe', { ...expected, recipe: 'r2', files }, files],
     ['another Bun version', { ...expected, bun: '1.4.4', files }, files],
     ['an edited staged file', { ...expected, files }, { ...files, 'binaries/board': 'other' }],
     ['a deleted staged file', { ...expected, files }, { 'binaries/board': 'h1' }],
@@ -30,9 +39,12 @@ describe('parseCoreBuild', () => {
     expect(parseCoreBuild({ ...expected, files })).toEqual({ ...expected, files });
   });
 
-  it.each([null, [], { commit: 'x' }, { ...expected, files: { a: 1 } }])('treats %j as no manifest', (value) => {
-    expect(parseCoreBuild(value)).toBeNull();
-  });
+  it.each([null, [], { commit: 'x' }, { ...expected, files: { a: 1 } }, { commit: 'x', bun: '1', files: {} }])(
+    'treats %j as no manifest',
+    (value) => {
+      expect(parseCoreBuild(value)).toBeNull();
+    },
+  );
 });
 
 describe('missingTools', () => {
@@ -58,5 +70,26 @@ describe('stagingPlan', () => {
       server: 'binaries/board-server-aarch64-apple-darwin',
       cli: 'binaries/board-aarch64-apple-darwin',
     });
+  });
+});
+
+describe('the pinned Bun version', () => {
+  it('reads the version under [tools]', () => {
+    expect(parsePinnedBun('[tools]\nnode = "24.22.2"\nbun = "1.4.4"\n')).toBe('1.4.4');
+  });
+
+  it('reads nothing when the core pins no Bun', () => {
+    expect(parsePinnedBun('[tools]\nnode = "24.22.2"\n')).toBeNull();
+  });
+
+  it('refuses a different version, naming both', () => {
+    expect(bunVersionError('1.4.4', '1.2.18')).toBe(
+      'The core pins Bun 1.4.4 but this machine has Bun 1.2.18; install Bun 1.4.4 to build it',
+    );
+  });
+
+  it('accepts the same version and refuses a core that pins none', () => {
+    expect(bunVersionError('1.4.4', '1.4.4')).toBeNull();
+    expect(bunVersionError(null, '1.4.4')).toContain('pins no Bun');
   });
 });

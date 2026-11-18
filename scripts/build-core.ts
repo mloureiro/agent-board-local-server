@@ -7,10 +7,12 @@ import {
   BUILD_MANIFEST,
   BUN_TARGET,
   CLI_TARGET,
-  REQUIRED_TOOLS,
   isBuildCurrent,
+  bunVersionError,
   missingTools,
   parseCoreBuild,
+  parsePinnedBun,
+  type ToolAvailability,
   stagedBinaries,
   stagingPlan,
   type CoreBuild,
@@ -47,6 +49,12 @@ function hashStaged(): Record<string, string> {
   );
 }
 
+const recipeFingerprint = (): string => {
+  const hash = createHash('sha256');
+  for (const file of ['build-core.ts', 'core-build-plan.ts']) hash.update(readFileSync(join(root, 'scripts', file)));
+  return hash.digest('hex');
+};
+
 function readRecordedBuild(): CoreBuild | null {
   try {
     return parseCoreBuild(JSON.parse(readFileSync(join(tauriDir, BUILD_MANIFEST), 'utf8')));
@@ -72,6 +80,8 @@ function materialise(repository: string, commit: string): string {
   }
   const actual = head();
   if (actual !== commit) throw new Error(`The core checkout is at ${actual ?? 'nothing'}, not at the pinned ${commit}`);
+  if (spawnSync('git', ['diff', '--quiet', 'HEAD'], { cwd: dir }).status !== 0)
+    throw new Error(`The core checkout in ${dir} has changes that are not in the pinned commit; delete it and rebuild`);
   return dir;
 }
 
@@ -93,18 +103,23 @@ function stage(coreDir: string, serverBinary: string, cliBinary: string): void {
 }
 
 function main(): void {
-  const missing = missingTools(Object.fromEntries(REQUIRED_TOOLS.map((tool) => [tool, hasTool(tool)])) as never);
+  const found: ToolAvailability = { git: hasTool('git'), pnpm: hasTool('pnpm'), bun: hasTool('bun') };
+  const missing = missingTools(found);
   if (missing.length > 0) throw new Error(`core:build needs ${missing.join(', ')} on PATH`);
 
   const pin = parseCorePin(JSON.parse(readFileSync(join(root, 'core.pin.json'), 'utf8')));
   const bun = output('bun', ['--version']);
 
-  if (isBuildCurrent(readRecordedBuild(), { commit: pin.commit, bun }, hashStaged())) {
+  const recipe = recipeFingerprint();
+
+  if (isBuildCurrent(readRecordedBuild(), { commit: pin.commit, bun, recipe }, hashStaged())) {
     console.log(`The core at ${pin.commit} is already built and staged`);
     return;
   }
 
   const coreDir = materialise(pin.repository, pin.commit);
+  const bunError = bunVersionError(parsePinnedBun(readFileSync(join(coreDir, 'mise.toml'), 'utf8')), bun);
+  if (bunError !== null) throw new Error(bunError);
   run('pnpm', ['install', '--frozen-lockfile'], coreDir);
   run('pnpm', ['--filter', '@agent-board/frontend', 'build'], coreDir);
 
@@ -131,7 +146,7 @@ function main(): void {
 
   stage(coreDir, serverBinary, join(cliOut, `board-${CLI_TARGET}`));
 
-  const build: CoreBuild = { commit: pin.commit, bun, files: hashStaged() };
+  const build: CoreBuild = { commit: pin.commit, bun, recipe, files: hashStaged() };
   writeFileSync(join(tauriDir, BUILD_MANIFEST), `${JSON.stringify(build, null, 2)}\n`);
   console.log(`Staged the core at ${pin.commit}`);
 }

@@ -15,7 +15,8 @@
     "format:check": "prettier --check . && cargo fmt --manifest-path src-tauri/Cargo.toml --check",
     "lint": "eslint . && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "typecheck": "tsc -p tsconfig.json && cargo check --manifest-path src-tauri/Cargo.toml --all-targets",
-    "test": "vitest --run && cargo test --manifest-path src-tauri/Cargo.toml"
+    "test": "vitest --run && cargo test --manifest-path src-tauri/Cargo.toml",
+    "core:build": "node scripts/build-core.ts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

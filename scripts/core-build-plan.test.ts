@@ -3,6 +3,7 @@ import {
   bunVersionError,
   isBuildCurrent,
   missingTools,
+  parseBuildArgs,
   parsePinnedBun,
   parseCoreBuild,
   stagingPlan,
@@ -91,5 +92,27 @@ describe('the pinned Bun version', () => {
   it('accepts the same version and refuses a core that pins none', () => {
     expect(bunVersionError('1.4.4', '1.4.4')).toBeNull();
     expect(bunVersionError(null, '1.4.4')).toContain('pins no Bun');
+  });
+});
+
+describe('the build options', () => {
+  it("builds the app's own pin into the app when given nothing", () => {
+    expect(parseBuildArgs([])).toEqual({ pin: null, out: null });
+  });
+
+  it('takes a pin and a staging directory together', () => {
+    expect(parseBuildArgs(['--pin', 'old.json', '--out', '/tmp/old'])).toEqual({ pin: 'old.json', out: '/tmp/old' });
+  });
+
+  it.each([[['--pin', 'old.json']], [['--out', '/tmp/old']]])(
+    'refuses %j alone, so the app is never staged from another pin',
+    (args) => {
+      expect(() => parseBuildArgs(args)).toThrow('go together');
+    },
+  );
+
+  it('refuses an unknown option and a missing value', () => {
+    expect(() => parseBuildArgs(['--force', 'x'])).toThrow('Unknown option --force');
+    expect(() => parseBuildArgs(['--pin'])).toThrow('--pin needs a value');
   });
 });

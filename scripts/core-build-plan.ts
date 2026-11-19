@@ -76,3 +76,18 @@ export function isBuildCurrent(
   if (recordedPaths.length === 0 || recordedPaths.length !== Object.keys(actualFiles).length) return false;
   return recordedPaths.every((path) => recorded.files[path] === actualFiles[path]);
 }
+
+export function parseBuildArgs(argv: string[]): { pin: string | null; out: string | null } {
+  let pin: string | null = null;
+  let out: string | null = null;
+  for (let index = 0; index < argv.length; index += 2) {
+    const value = argv[index + 1];
+    if (value === undefined) throw new Error(`${argv[index]} needs a value`);
+    if (argv[index] === '--pin') pin = value;
+    else if (argv[index] === '--out') out = value;
+    else throw new Error(`Unknown option ${argv[index]}`);
+  }
+  if ((pin === null) !== (out === null))
+    throw new Error('--pin and --out go together: a pin other than core.pin.json is never staged into the app');
+  return { pin, out };
+}

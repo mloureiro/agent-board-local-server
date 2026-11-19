@@ -8,12 +8,12 @@ use super::process::{signal_group, Pidfile};
 
 const POLL: Duration = Duration::from_millis(100);
 
-struct Observed {
-    state: String,
-    command: String,
+pub struct Observed {
+    pub state: String,
+    pub command: String,
 }
 
-async fn observe(pid: u32) -> Option<Observed> {
+pub async fn observe(pid: u32) -> Option<Observed> {
     let output = Command::new("/bin/ps")
         .args(["-ww", "-o", "stat=,command=", "-p", &pid.to_string()])
         .output()

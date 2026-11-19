@@ -7,10 +7,11 @@ use tokio::sync::Mutex;
 
 use crate::lock::{self, LockError};
 use crate::paths::{AppPaths, Resources, Sidecars};
-use crate::runtime::{self, Config, Handle, BACKEND, PROXY};
+use crate::runtime::{self, Config, Handle, WorkerConfig, BACKEND, PROXY};
 use crate::secrets::Keychain;
 use crate::settings::Settings;
 use crate::supervisor::StatusBoard;
+use crate::worker::processes::{DISPATCH, WORKER_LISTEN, WORKER_WATCH};
 
 const QUIT: &str = "quit";
 
@@ -49,7 +50,38 @@ pub fn run() {
             let quit = MenuItem::with_id(app, QUIT, "Quit", true, None::<&str>)?;
             let proxy_status =
                 MenuItem::with_id(app, "proxy-status", "Proxy: waiting", false, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&status, &proxy_status, &quit])?;
+            let listener_status = MenuItem::with_id(
+                app,
+                "worker-listen-status",
+                "Worker listener: waiting",
+                false,
+                None::<&str>,
+            )?;
+            let watch_status = MenuItem::with_id(
+                app,
+                "worker-watch-status",
+                "Worker watch: waiting",
+                false,
+                None::<&str>,
+            )?;
+            let tick_status = MenuItem::with_id(
+                app,
+                "dispatch-status",
+                "Last dispatch tick: none yet",
+                false,
+                None::<&str>,
+            )?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &status,
+                    &proxy_status,
+                    &listener_status,
+                    &watch_status,
+                    &tick_status,
+                    &quit,
+                ],
+            )?;
 
             let board = Arc::new(StatusBoard::default());
             let running: Running = Arc::new(Mutex::new(None));
@@ -78,6 +110,9 @@ pub fn run() {
                     for (name, title, item) in [
                         (BACKEND, "Backend", &status),
                         (PROXY, "Proxy", &proxy_status),
+                        (WORKER_LISTEN, "Worker listener", &listener_status),
+                        (WORKER_WATCH, "Worker watch", &watch_status),
+                        (DISPATCH, "Last dispatch tick", &tick_status),
                     ] {
                         if let Some(current) = reader.get(name) {
                             let label = current.label(title);
@@ -88,6 +123,25 @@ pub fn run() {
                         }
                     }
                 }
+            });
+
+            let signalled = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use tokio::signal::unix::{signal, SignalKind};
+                let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
+                    signal(SignalKind::terminate()),
+                    signal(SignalKind::interrupt()),
+                    signal(SignalKind::hangup()),
+                ) else {
+                    eprintln!("cannot listen for SIGTERM, SIGINT and SIGHUP");
+                    return;
+                };
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = int.recv() => {}
+                    _ = hup.recv() => {}
+                }
+                quit_app(&signalled);
             });
 
             let handle = app.handle().clone();
@@ -104,9 +158,15 @@ pub fn run() {
                     login_name: login_name(),
                     port_override: None,
                     upstream_override: None,
+                    worker: std::env::current_exe()
+                        .ok()
+                        .map(|app_executable| WorkerConfig {
+                            secrets: Arc::new(Keychain::app()),
+                            app_executable,
+                        }),
                     paths: paths.clone(),
                 };
-                match runtime::start(config, lock, Arc::new(Keychain), board.clone()).await {
+                match runtime::start(config, lock, Arc::new(Keychain::app()), board.clone()).await {
                     Ok(running) => {
                         apply_autostart(&handle, &paths);
                         *startup = Some(running);
@@ -118,15 +178,27 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("the app could not start")
-        .run(|_app, event| {
+        .run(|app, event| match event {
             // Tauri asks to exit when no window is left, and this app never has one; only Quit carries a code.
-            if let RunEvent::ExitRequested {
+            RunEvent::ExitRequested {
                 api, code: None, ..
-            } = event
-            {
-                api.prevent_exit();
-            }
+            } => api.prevent_exit(),
+            RunEvent::Exit => stop_before_exit(app),
+            _ => {}
         });
+}
+
+/// The system can end the app without a Quit click (log out, restart, a terminate request); the processes it
+/// started must not outlive it, so whatever Quit has not already stopped is stopped here.
+fn stop_before_exit(app: &AppHandle) {
+    let Some(running) = app.try_state::<Running>() else {
+        return;
+    };
+    let running = running.inner().clone();
+    let handle = running.try_lock().ok().and_then(|mut slot| slot.take());
+    if let Some(handle) = handle {
+        tauri::async_runtime::block_on(handle.stop());
+    }
 }
 
 /// The startup guard on the shared slot makes a quit that arrives mid-start wait until what started can be stopped.

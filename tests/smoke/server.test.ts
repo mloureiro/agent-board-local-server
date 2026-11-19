@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { cpSync, readFileSync } from 'node:fs';
+import { cpSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -131,6 +131,15 @@ describe('the built backend behind the proxy', () => {
     });
 
     expect(status).toBe(421);
+  });
+
+  it('keeps the worker in directories of its own and starts none of it before enrolment', () => {
+    const worker = join(runner.appRoot, 'worker');
+
+    for (const dir of ['bin', 'config', 'state', 'run']) expect(statSync(join(worker, dir)).isDirectory()).toBe(true);
+    expect(readlinkSync(join(worker, 'bin/board'))).toMatch(/board-aarch64-apple-darwin$/);
+    expect(runner.output()).toContain('Worker not connected');
+    expect(runner.output()).not.toMatch(/worker (listener|watch)/);
   });
 
   it('listens on loopback only', () => {

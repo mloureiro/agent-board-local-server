@@ -139,6 +139,36 @@ pub fn last_log_line(path: &Path) -> Option<String> {
     Some(line.chars().take(160).collect())
 }
 
+pub fn describe_exit(status: io::Result<ExitStatus>) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    match status {
+        Ok(status) => match (status.code(), status.signal()) {
+            (Some(code), _) => format!("exited with code {code}"),
+            (None, Some(signal)) => format!("killed by signal {signal}"),
+            (None, None) => "exited".into(),
+        },
+        Err(error) => format!("could not be waited on: {error}"),
+    }
+}
+
+pub fn with_log_tail(reason: String, log: &Path) -> String {
+    if !reason.starts_with("exited with code") {
+        return reason;
+    }
+    match last_log_line(log) {
+        Some(line) => format!("{reason}: {line}"),
+        None => reason,
+    }
+}
+
+pub async fn stop_requested(stop: &mut tokio::sync::watch::Receiver<bool>) {
+    while !*stop.borrow() {
+        if stop.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

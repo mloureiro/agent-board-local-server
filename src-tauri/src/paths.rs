@@ -52,6 +52,35 @@ impl AppPaths {
     pub fn default_data_dir(&self) -> PathBuf {
         self.root.join("data")
     }
+
+    pub fn worker_dir(&self) -> PathBuf {
+        self.root.join("worker")
+    }
+
+    pub fn worker_bin_dir(&self) -> PathBuf {
+        self.worker_dir().join("bin")
+    }
+
+    pub fn worker_board(&self) -> PathBuf {
+        self.worker_bin_dir().join("board")
+    }
+
+    pub fn worker_credentials(&self) -> PathBuf {
+        self.worker_dir()
+            .join(crate::worker::credentials::HELPER_LINK)
+    }
+
+    pub fn worker_config_dir(&self) -> PathBuf {
+        self.worker_dir().join("config")
+    }
+
+    pub fn worker_state_dir(&self) -> PathBuf {
+        self.worker_dir().join("state")
+    }
+
+    pub fn worker_run_dir(&self) -> PathBuf {
+        self.worker_dir().join("run")
+    }
 }
 
 pub fn pglite_dir(data_dir: &Path) -> PathBuf {

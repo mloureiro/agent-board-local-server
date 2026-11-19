@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,8 +14,13 @@ use crate::proxy::{Proxy, ProxyConfig};
 use crate::secrets::{proxy_secret, SecretError, SecretStore};
 use crate::settings::{Settings, SettingsError};
 use crate::supervisor::orphans;
-use crate::supervisor::process::{last_log_line, rotate_if_larger, LOG_LIMIT};
+use crate::supervisor::process::{
+    describe_exit, rotate_if_larger, stop_requested, with_log_tail, LOG_LIMIT,
+};
 use crate::supervisor::{decide, Decision, ProcessSpec, RunningProcess, Status, StatusBoard};
+use crate::worker::enrol::{host_name, EnrolError};
+use crate::worker::processes::{WorkerSetup, WORKER_LISTEN};
+use crate::worker::{env as worker_env, WorkerControl};
 
 pub const BACKEND: &str = "backend";
 pub const PROXY: &str = "proxy";
@@ -30,6 +36,14 @@ pub struct Config {
     pub port_override: Option<u16>,
     /// Serve the proxy in front of this local port and start no backend; for tests that compare the proxy to another one.
     pub upstream_override: Option<u16>,
+    /// The worker's credentials and the executable that prints them for the CLI. Ignored with `upstream_override`.
+    pub worker: Option<WorkerConfig>,
+}
+
+pub struct WorkerConfig {
+    pub secrets: Arc<dyn SecretStore>,
+    /// The executable that serves the credentials, reached by the CLI through a link in the worker directory.
+    pub app_executable: PathBuf,
 }
 
 #[derive(Debug)]
@@ -50,18 +64,33 @@ impl fmt::Display for StartError {
 impl std::error::Error for StartError {}
 
 pub struct Handle {
-    stop: watch::Sender<bool>,
-    tasks: [JoinHandle<()>; 2],
+    stop_worker: watch::Sender<bool>,
+    stop_proxy: watch::Sender<bool>,
+    stop_backend: watch::Sender<bool>,
+    worker_task: JoinHandle<()>,
+    proxy_task: JoinHandle<()>,
+    backend_task: JoinHandle<()>,
+    worker: Option<Arc<WorkerControl>>,
     _lock: Lock,
 }
 
 impl Handle {
-    /// Returns once everything the runtime started has stopped; the lock is released afterwards.
-    pub async fn stop(self) {
-        let _ = self.stop.send(true);
-        for task in self.tasks {
-            let _ = task.await;
+    pub async fn enrol(&self, token: &str, data_key: &str) -> Result<(), EnrolError> {
+        match &self.worker {
+            Some(worker) => worker.enrol(token, data_key).await,
+            None => Err(EnrolError::new("this run has no worker")),
         }
+    }
+
+    /// Stops in reverse order of the start, so that the runs can report as paused while the board is still up:
+    /// worker, proxy, backend. Returns once all of it has stopped; the lock is released afterwards.
+    pub async fn stop(self) {
+        let _ = self.stop_worker.send(true);
+        let _ = self.worker_task.await;
+        let _ = self.stop_proxy.send(true);
+        let _ = self.proxy_task.await;
+        let _ = self.stop_backend.send(true);
+        let _ = self.backend_task.await;
     }
 }
 
@@ -92,8 +121,15 @@ pub async fn start(
         .map_err(StartError::Secret)
         .map_err(blocked)?;
 
-    let (stop, stopped) = watch::channel(false);
-    let proxy = tokio::spawn(serve_proxy(
+    let worker = match (&config.worker, config.upstream_override) {
+        (Some(worker), None) => prepare_worker(&config, worker, &board),
+        _ => None,
+    };
+
+    let (stop_worker, worker_stopped) = watch::channel(false);
+    let (stop_proxy, proxy_stopped) = watch::channel(false);
+    let (stop_backend, backend_stopped) = watch::channel(false);
+    let proxy_task = tokio::spawn(serve_proxy(
         ProxySetup {
             port: settings.port,
             user_name: settings.user_name.clone(),
@@ -102,9 +138,13 @@ pub async fn start(
             upstream_override: config.upstream_override,
         },
         board.clone(),
-        stopped.clone(),
+        proxy_stopped,
     ));
-    let backend = if config.upstream_override.is_some() {
+    let worker_task = match &worker {
+        Some(worker) => tokio::spawn(run_worker(worker.clone(), board.clone(), worker_stopped)),
+        None => tokio::spawn(async {}),
+    };
+    let backend_task = if config.upstream_override.is_some() {
         tokio::spawn(async {})
     } else {
         tokio::spawn(supervise_backend(
@@ -114,14 +154,69 @@ pub async fn start(
                 secret,
                 board,
             },
-            stopped,
+            backend_stopped,
         ))
     };
     Ok(Handle {
-        stop,
-        tasks: [backend, proxy],
+        stop_worker,
+        stop_proxy,
+        stop_backend,
+        worker_task,
+        proxy_task,
+        backend_task,
+        worker,
         _lock: lock,
     })
+}
+
+fn prepare_worker(
+    config: &Config,
+    worker: &WorkerConfig,
+    board: &Arc<StatusBoard>,
+) -> Option<Arc<WorkerControl>> {
+    let setup = WorkerSetup {
+        paths: config.paths.clone(),
+        board: config.paths.worker_board(),
+        env: worker_env::environment(&config.paths, &config.paths.worker_credentials(), &|name| {
+            std::env::var(name).ok()
+        }),
+        lockf: PathBuf::from("/usr/bin/lockf"),
+    };
+    let control = Arc::new(WorkerControl::new(
+        setup,
+        worker.secrets.clone(),
+        board.clone(),
+        host_name(),
+    ));
+    match control.prepare(&config.sidecars.board, &worker.app_executable) {
+        Ok(()) => Some(control),
+        Err(reason) => {
+            board.set(WORKER_LISTEN, Status::Blocked { reason });
+            None
+        }
+    }
+}
+
+async fn run_worker(
+    worker: Arc<WorkerControl>,
+    board: Arc<StatusBoard>,
+    mut stop: watch::Receiver<bool>,
+) {
+    let mut changes = board.subscribe();
+    let proxy_runs = loop {
+        if matches!(board.get(PROXY), Some(Status::Running { .. })) {
+            break true;
+        }
+        tokio::select! {
+            changed = changes.changed() => if changed.is_err() { break false },
+            () = stop_requested(&mut stop) => break false,
+        }
+    };
+    if proxy_runs {
+        worker.proxy_ready().await;
+        stop_requested(&mut stop).await;
+    }
+    worker.stop().await;
 }
 
 struct ProxySetup {
@@ -202,41 +297,11 @@ impl Backend {
     }
 }
 
-async fn stop_requested(stop: &mut watch::Receiver<bool>) {
-    while !*stop.borrow() {
-        if stop.changed().await.is_err() {
-            return;
-        }
-    }
-}
-
 enum Outcome {
     Stop,
     Exited(String),
     NotHealthy,
     Healthy,
-}
-
-fn describe_exit(status: std::io::Result<std::process::ExitStatus>) -> String {
-    use std::os::unix::process::ExitStatusExt;
-    match status {
-        Ok(status) => match (status.code(), status.signal()) {
-            (Some(code), _) => format!("exited with code {code}"),
-            (None, Some(signal)) => format!("killed by signal {signal}"),
-            (None, None) => "exited".into(),
-        },
-        Err(error) => format!("could not be waited on: {error}"),
-    }
-}
-
-fn with_log_tail(reason: String, log: &std::path::Path) -> String {
-    if !reason.starts_with("exited with code") {
-        return reason;
-    }
-    match last_log_line(log) {
-        Some(line) => format!("{reason}: {line}"),
-        None => reason,
-    }
 }
 
 async fn supervise_backend(backend: Backend, mut stop: watch::Receiver<bool>) {

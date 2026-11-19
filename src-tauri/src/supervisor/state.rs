@@ -17,6 +17,8 @@ pub enum Status {
     Blocked {
         reason: String,
     },
+    NotConnected,
+    Note(String),
     Stopped,
 }
 
@@ -39,6 +41,8 @@ impl Status {
                 restart_in: None,
             } => format!("{title}: crashed ({reason})"),
             Self::Blocked { reason } => format!("{title}: not started ({reason})"),
+            Self::NotConnected => "Worker not connected".into(),
+            Self::Note(text) => format!("{title}: {text}"),
             Self::Stopped => format!("{title}: stopped"),
         }
     }

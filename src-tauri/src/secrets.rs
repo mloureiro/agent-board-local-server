@@ -20,19 +20,32 @@ impl std::error::Error for SecretError {}
 pub trait SecretStore: Send + Sync {
     fn get(&self, account: &str) -> Result<Option<String>, SecretError>;
     fn set(&self, account: &str, value: &str) -> Result<(), SecretError>;
+    fn delete(&self, account: &str) -> Result<(), SecretError>;
 }
 
-pub struct Keychain;
+pub struct Keychain {
+    service: String,
+}
 
 impl Keychain {
-    fn entry(account: &str) -> Result<keyring::Entry, SecretError> {
-        keyring::Entry::new(APP_IDENTIFIER, account).map_err(|error| SecretError(error.to_string()))
+    pub fn app() -> Self {
+        Self::with_service(APP_IDENTIFIER)
+    }
+
+    pub fn with_service(service: impl Into<String>) -> Self {
+        Self {
+            service: service.into(),
+        }
+    }
+
+    fn entry(&self, account: &str) -> Result<keyring::Entry, SecretError> {
+        keyring::Entry::new(&self.service, account).map_err(|error| SecretError(error.to_string()))
     }
 }
 
 impl SecretStore for Keychain {
     fn get(&self, account: &str) -> Result<Option<String>, SecretError> {
-        match Self::entry(account)?.get_password() {
+        match self.entry(account)?.get_password() {
             Ok(value) => Ok(Some(value)),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(error) => Err(SecretError(error.to_string())),
@@ -40,9 +53,16 @@ impl SecretStore for Keychain {
     }
 
     fn set(&self, account: &str, value: &str) -> Result<(), SecretError> {
-        Self::entry(account)?
+        self.entry(account)?
             .set_password(value)
             .map_err(|error| SecretError(error.to_string()))
+    }
+
+    fn delete(&self, account: &str) -> Result<(), SecretError> {
+        match self.entry(account)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(SecretError(error.to_string())),
+        }
     }
 }
 
@@ -66,6 +86,11 @@ impl SecretStore for MemoryStore {
             .lock()
             .expect("store lock")
             .insert(account.to_owned(), value.to_owned());
+        Ok(())
+    }
+
+    fn delete(&self, account: &str) -> Result<(), SecretError> {
+        self.values.lock().expect("store lock").remove(account);
         Ok(())
     }
 }

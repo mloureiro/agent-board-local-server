@@ -190,8 +190,7 @@ async fn main() {
                 result = &mut enrolment, if !enrolled => {
                     enrolled = true;
                     match result {
-                        Ok(true) => println!("worker enrolled"),
-                        Ok(false) => {}
+                        Ok(_) => {}
                         Err(message) => {
                             println!("worker enrolment failed: {message}");
                             break 1;
@@ -233,5 +232,15 @@ async fn enrol_from_stdin(
         .enrol(&token, &data_key)
         .await
         .map_err(|error| error.to_string())?;
-    Ok(true)
+    println!("worker enrolled");
+    loop {
+        let next = tokio::task::spawn_blocking(read_credentials_from_stdin).await;
+        let Ok(Ok((token, data_key))) = next else {
+            return Ok(true);
+        };
+        match handle.enrol(&token, &data_key).await {
+            Ok(()) => println!("worker re-enrolled"),
+            Err(error) => println!("worker re-enrolment failed: {error}"),
+        }
+    }
 }

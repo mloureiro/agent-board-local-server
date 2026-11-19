@@ -63,6 +63,8 @@ impl fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
+pub type Running = Arc<tokio::sync::Mutex<Option<Handle>>>;
+
 pub struct Handle {
     stop_worker: watch::Sender<bool>,
     stop_proxy: watch::Sender<bool>,
@@ -75,6 +77,10 @@ pub struct Handle {
 }
 
 impl Handle {
+    pub fn worker(&self) -> Option<Arc<WorkerControl>> {
+        self.worker.clone()
+    }
+
     pub async fn enrol(&self, token: &str, data_key: &str) -> Result<(), EnrolError> {
         match &self.worker {
             Some(worker) => worker.enrol(token, data_key).await,

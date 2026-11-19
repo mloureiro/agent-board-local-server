@@ -60,9 +60,15 @@ pub fn promote_pending(store: &dyn SecretStore) -> Result<(), SecretError> {
     discard_pending(store)
 }
 
+pub fn pending_present(store: &dyn SecretStore) -> Result<bool, SecretError> {
+    Ok(store.get(PENDING_TOKEN_ACCOUNT)?.is_some()
+        || store.get(PENDING_DATA_KEY_ACCOUNT)?.is_some())
+}
+
 pub fn discard_pending(store: &dyn SecretStore) -> Result<(), SecretError> {
-    store.delete(PENDING_TOKEN_ACCOUNT)?;
-    store.delete(PENDING_DATA_KEY_ACCOUNT)
+    let token = store.delete(PENDING_TOKEN_ACCOUNT);
+    let data_key = store.delete(PENDING_DATA_KEY_ACCOUNT);
+    token.and(data_key)
 }
 
 #[derive(Debug)]

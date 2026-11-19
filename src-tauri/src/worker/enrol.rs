@@ -199,17 +199,26 @@ pub async fn enrol<R: InitRunner>(
     discard_pending(store)?;
     write_pending(store, &credentials)?;
     match runner.run_init(url, machine).await {
-        Ok(()) => promote_pending(store).map_err(|error| {
-            let _ = discard_pending(store);
-            EnrolError::from(error)
-        }),
-        Err(message) => {
-            let _ = discard_pending(store);
-            Err(EnrolError::new(scrub(
+        Ok(()) => match promote_pending(store) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(with_cleanup(EnrolError::from(error), store)),
+        },
+        Err(message) => Err(with_cleanup(
+            EnrolError::new(scrub(
                 &message,
                 &[&credentials.token, &credentials.data_key],
-            )))
-        }
+            )),
+            store,
+        )),
+    }
+}
+
+fn with_cleanup(error: EnrolError, store: &dyn SecretStore) -> EnrolError {
+    match discard_pending(store) {
+        Ok(()) => error,
+        Err(cleanup) => EnrolError::new(format!(
+            "{error}; the pending credentials could not be removed from the Keychain ({cleanup})"
+        )),
     }
 }
 
@@ -217,6 +226,7 @@ pub async fn enrol<R: InitRunner>(
 mod tests {
     use std::sync::Mutex;
 
+    use crate::secrets::testing::DeletesFailWhenArmed;
     use crate::secrets::MemoryStore;
     use crate::worker::credentials::{helper_output, TOKEN_ACCOUNT};
 
@@ -278,6 +288,35 @@ mod tests {
             helper_output(store.as_ref()).unwrap(),
             "AGENT_BOARD_TOKEN=abm_old\nAGENT_BOARD_DATA_KEY=abk1_old\n"
         );
+    }
+
+    struct ArmsTheStore(std::sync::Arc<DeletesFailWhenArmed>);
+
+    impl InitRunner for ArmsTheStore {
+        async fn run_init(&self, _url: &str, _machine: &str) -> Result<(), String> {
+            self.0.arm();
+            Err("refused".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_pair_that_cannot_be_removed_is_reported_and_still_visible_as_pending() {
+        let store = std::sync::Arc::new(DeletesFailWhenArmed::default());
+
+        let error = enrol(
+            store.as_ref(),
+            &ArmsTheStore(store.clone()),
+            "http://127.0.0.1:4785",
+            "mac",
+            "abm_new",
+            "abk1_new",
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().starts_with("refused;"));
+        assert!(error.to_string().contains("could not be removed"));
+        assert!(crate::worker::credentials::pending_present(store.as_ref()).unwrap());
     }
 
     #[tokio::test]

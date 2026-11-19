@@ -196,19 +196,31 @@ async fn forward(
     }
 }
 
+/// Caddy sets `Cache-Control` per route before the file server answers, so a 404 or a 405 under `/assets/` carries
+/// the asset value and every other static answer carries `no-cache`.
 async fn serve_static(state: &State, method: &Method, path: &str) -> Response<Body> {
+    let cache = HeaderValue::from_static(if path.starts_with("/assets/") {
+        ASSET_CACHE
+    } else {
+        PAGE_CACHE
+    });
+    let plain = |status: StatusCode| {
+        let mut response = answer(status, false);
+        response.headers_mut().insert(CACHE_CONTROL, cache.clone());
+        response
+    };
     if !matches!(*method, Method::GET | Method::HEAD) {
-        let mut response = answer(StatusCode::METHOD_NOT_ALLOWED, false);
+        let mut response = plain(StatusCode::METHOD_NOT_ALLOWED);
         response
             .headers_mut()
             .insert(ALLOW, HeaderValue::from_static("GET, HEAD"));
         return response;
     }
     match state.files.resolve(path) {
-        Served::Refused => answer(StatusCode::BAD_REQUEST, false),
-        Served::NotFound => answer(StatusCode::NOT_FOUND, false),
+        Served::Refused => plain(StatusCode::BAD_REQUEST),
+        Served::NotFound => plain(StatusCode::NOT_FOUND),
         Served::File { path, immutable } => match tokio::fs::read(&path).await {
-            Err(_) => answer(StatusCode::NOT_FOUND, false),
+            Err(_) => plain(StatusCode::NOT_FOUND),
             Ok(content) => {
                 let length = content.len();
                 let body = if *method == Method::HEAD {

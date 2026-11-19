@@ -13,11 +13,19 @@ const PACKAGING: &str = env!("CARGO_MANIFEST_DIR");
 struct Args {
     app_root: PathBuf,
     port: Option<u16>,
+    upstream: Option<u16>,
+}
+
+fn loopback_port(url: &str) -> Result<u16, String> {
+    url.strip_prefix("http://127.0.0.1:")
+        .and_then(|port| port.trim_end_matches('/').parse().ok())
+        .ok_or_else(|| format!("{url} is not an http://127.0.0.1:<port> address"))
 }
 
 fn parse() -> Result<Args, String> {
     let mut app_root = None;
     let mut port = None;
+    let mut upstream = None;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let value = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
@@ -30,12 +38,14 @@ fn parse() -> Result<Args, String> {
                         .map_err(|_| format!("{value} is not a port"))?,
                 )
             }
+            "--upstream" => upstream = Some(loopback_port(&value)?),
             other => return Err(format!("unknown flag {other}")),
         }
     }
     Ok(Args {
         app_root: app_root.ok_or("--app-root <dir> is required")?,
         port,
+        upstream,
     })
 }
 
@@ -66,6 +76,7 @@ async fn main() {
         resources: Resources::new(PACKAGING),
         login_name: std::env::var("USER").unwrap_or_else(|_| "user".into()),
         port_override: args.port,
+        upstream_override: args.upstream,
         paths,
     };
     let board = Arc::new(StatusBoard::default());

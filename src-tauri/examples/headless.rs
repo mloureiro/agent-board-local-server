@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use agent_board_local_server::lock::{self, LockError};
 use agent_board_local_server::paths::{AppPaths, Resources, Sidecars};
-use agent_board_local_server::runtime::{self, Config, BACKEND};
+use agent_board_local_server::runtime::{self, Config, BACKEND, PROXY};
 use agent_board_local_server::secrets::MemoryStore;
 use agent_board_local_server::supervisor::{Status, StatusBoard};
 use tokio::signal::unix::{signal, SignalKind};
@@ -72,11 +72,19 @@ async fn main() {
     let mut changes = board.subscribe();
     let reporter = board.clone();
     tokio::spawn(async move {
+        let mut printed = std::collections::BTreeMap::new();
         while changes.changed().await.is_ok() {
-            match reporter.get(BACKEND) {
-                Some(Status::Running { port }) => println!("backend running on 127.0.0.1:{port}"),
-                Some(status) => println!("{}", status.label("Backend")),
-                None => {}
+            for (name, title) in [(BACKEND, "backend"), (PROXY, "proxy")] {
+                let Some(status) = reporter.get(name) else {
+                    continue;
+                };
+                let line = match status {
+                    Status::Running { port } => format!("{title} running on 127.0.0.1:{port}"),
+                    other => other.label(title),
+                };
+                if printed.insert(name, line.clone()).as_deref() != Some(line.as_str()) {
+                    println!("{line}");
+                }
             }
         }
     });

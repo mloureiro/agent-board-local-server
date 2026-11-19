@@ -21,6 +21,11 @@ libc = "0.2"
 keyring = { version = "3", features = ["apple-native"] }
 rand = "0.9"
 percent-encoding = "2"
+http = "1"
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "http1", "client-legacy"] }
+http-body-util = "0.1"
+bytes = "1"
 
 [dev-dependencies]
 tempfile = "3"

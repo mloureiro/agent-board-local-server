@@ -9,6 +9,7 @@ use tokio::time::sleep;
 use crate::backend::{self, HEALTH_LIMIT, HEALTH_POLL};
 use crate::lock::Lock;
 use crate::paths::{AppPaths, Resources, Sidecars};
+use crate::proxy::{Proxy, ProxyConfig};
 use crate::secrets::{proxy_secret, SecretError, SecretStore};
 use crate::settings::{Settings, SettingsError};
 use crate::supervisor::orphans;
@@ -16,6 +17,7 @@ use crate::supervisor::process::{last_log_line, rotate_if_larger, LOG_LIMIT};
 use crate::supervisor::{decide, Decision, ProcessSpec, RunningProcess, Status, StatusBoard};
 
 pub const BACKEND: &str = "backend";
+pub const PROXY: &str = "proxy";
 const ORPHAN_GRACE: Duration = Duration::from_secs(5);
 const STOP_GRACE: Duration = Duration::from_secs(10);
 const LOG_CHECK: Duration = Duration::from_secs(60);
@@ -47,7 +49,7 @@ impl std::error::Error for StartError {}
 
 pub struct Handle {
     stop: watch::Sender<bool>,
-    task: JoinHandle<()>,
+    tasks: [JoinHandle<()>; 2],
     _lock: Lock,
 }
 
@@ -55,7 +57,9 @@ impl Handle {
     /// Returns once everything the runtime started has stopped; the lock is released afterwards.
     pub async fn stop(self) {
         let _ = self.stop.send(true);
-        let _ = self.task.await;
+        for task in self.tasks {
+            let _ = task.await;
+        }
     }
 }
 
@@ -87,7 +91,17 @@ pub async fn start(
         .map_err(blocked)?;
 
     let (stop, stopped) = watch::channel(false);
-    let task = tokio::spawn(supervise_backend(
+    let proxy = tokio::spawn(serve_proxy(
+        ProxySetup {
+            port: settings.port,
+            user_name: settings.user_name.clone(),
+            secret: secret.clone(),
+            frontend: config.resources.frontend(),
+        },
+        board.clone(),
+        stopped.clone(),
+    ));
+    let backend = tokio::spawn(supervise_backend(
         Backend {
             config,
             settings,
@@ -98,9 +112,63 @@ pub async fn start(
     ));
     Ok(Handle {
         stop,
-        task,
+        tasks: [backend, proxy],
         _lock: lock,
     })
+}
+
+struct ProxySetup {
+    port: u16,
+    user_name: String,
+    secret: String,
+    frontend: std::path::PathBuf,
+}
+
+fn running_port(board: &StatusBoard) -> Option<u16> {
+    match board.get(BACKEND) {
+        Some(Status::Running { port }) => Some(port),
+        _ => None,
+    }
+}
+
+/// The proxy opens once the backend has been healthy for the first time and stays up through its restarts,
+/// answering 502 while there is nothing to forward to. A port that cannot be bound leaves the app up without it.
+async fn serve_proxy(setup: ProxySetup, board: Arc<StatusBoard>, mut stop: watch::Receiver<bool>) {
+    let mut changes = board.subscribe();
+    loop {
+        if running_port(&board).is_some() {
+            break;
+        }
+        tokio::select! {
+            changed = changes.changed() => if changed.is_err() { return },
+            () = stop_requested(&mut stop) => return,
+        }
+    }
+
+    board.set(PROXY, Status::Starting);
+    let lookup = board.clone();
+    let started = Proxy::start(ProxyConfig {
+        port: setup.port,
+        user_name: setup.user_name,
+        secret: setup.secret,
+        frontend: setup.frontend,
+        upstream_port: Arc::new(move || running_port(&lookup)),
+    })
+    .await;
+    match started {
+        Ok(proxy) => {
+            board.set(PROXY, Status::Running { port: proxy.port() });
+            stop_requested(&mut stop).await;
+            proxy.stop().await;
+            board.set(PROXY, Status::Stopped);
+        }
+        Err(error) => board.set(
+            PROXY,
+            Status::Blocked {
+                reason: error.to_string(),
+            },
+        ),
+    }
 }
 
 struct Backend {

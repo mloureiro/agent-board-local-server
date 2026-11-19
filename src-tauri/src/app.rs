@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 
 use crate::lock::{self, LockError};
 use crate::paths::{AppPaths, Resources, Sidecars};
-use crate::runtime::{self, Config, Handle, BACKEND};
+use crate::runtime::{self, Config, Handle, BACKEND, PROXY};
 use crate::secrets::Keychain;
 use crate::settings::Settings;
 use crate::supervisor::StatusBoard;
@@ -47,7 +47,9 @@ pub fn run() {
             let status =
                 MenuItem::with_id(app, "status", "Backend: starting", false, None::<&str>)?;
             let quit = MenuItem::with_id(app, QUIT, "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&status, &quit])?;
+            let proxy_status =
+                MenuItem::with_id(app, "proxy-status", "Proxy: waiting", false, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&status, &proxy_status, &quit])?;
 
             let board = Arc::new(StatusBoard::default());
             let running: Running = Arc::new(Mutex::new(None));
@@ -73,10 +75,17 @@ pub fn run() {
             let reader = board.clone();
             tauri::async_runtime::spawn(async move {
                 while changes.changed().await.is_ok() {
-                    if let Some(current) = reader.get(BACKEND) {
-                        let label = current.label("Backend");
-                        eprintln!("{label}");
-                        let _ = status.set_text(label);
+                    for (name, title, item) in [
+                        (BACKEND, "Backend", &status),
+                        (PROXY, "Proxy", &proxy_status),
+                    ] {
+                        if let Some(current) = reader.get(name) {
+                            let label = current.label(title);
+                            if item.text().ok().as_deref() != Some(label.as_str()) {
+                                eprintln!("{label}");
+                                let _ = item.set_text(label);
+                            }
+                        }
                     }
                 }
             });

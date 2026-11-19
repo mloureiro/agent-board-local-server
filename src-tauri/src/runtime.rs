@@ -28,6 +28,8 @@ pub struct Config {
     pub resources: Resources,
     pub login_name: String,
     pub port_override: Option<u16>,
+    /// Serve the proxy in front of this local port and start no backend; for tests that compare the proxy to another one.
+    pub upstream_override: Option<u16>,
 }
 
 #[derive(Debug)]
@@ -97,19 +99,24 @@ pub async fn start(
             user_name: settings.user_name.clone(),
             secret: secret.clone(),
             frontend: config.resources.frontend(),
+            upstream_override: config.upstream_override,
         },
         board.clone(),
         stopped.clone(),
     ));
-    let backend = tokio::spawn(supervise_backend(
-        Backend {
-            config,
-            settings,
-            secret,
-            board,
-        },
-        stopped,
-    ));
+    let backend = if config.upstream_override.is_some() {
+        tokio::spawn(async {})
+    } else {
+        tokio::spawn(supervise_backend(
+            Backend {
+                config,
+                settings,
+                secret,
+                board,
+            },
+            stopped,
+        ))
+    };
     Ok(Handle {
         stop,
         tasks: [backend, proxy],
@@ -122,6 +129,7 @@ struct ProxySetup {
     user_name: String,
     secret: String,
     frontend: std::path::PathBuf,
+    upstream_override: Option<u16>,
 }
 
 fn running_port(board: &StatusBoard) -> Option<u16> {
@@ -136,7 +144,7 @@ fn running_port(board: &StatusBoard) -> Option<u16> {
 async fn serve_proxy(setup: ProxySetup, board: Arc<StatusBoard>, mut stop: watch::Receiver<bool>) {
     let mut changes = board.subscribe();
     loop {
-        if running_port(&board).is_some() {
+        if setup.upstream_override.is_some() || running_port(&board).is_some() {
             break;
         }
         tokio::select! {
@@ -152,7 +160,7 @@ async fn serve_proxy(setup: ProxySetup, board: Arc<StatusBoard>, mut stop: watch
         user_name: setup.user_name,
         secret: setup.secret,
         frontend: setup.frontend,
-        upstream_port: Arc::new(move || running_port(&lookup)),
+        upstream_port: Arc::new(move || setup.upstream_override.or_else(|| running_port(&lookup))),
     })
     .await;
     match started {

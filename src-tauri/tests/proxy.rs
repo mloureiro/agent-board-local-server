@@ -336,6 +336,18 @@ async fn the_frontend_is_served_with_the_page_headers_and_the_cache_rules_of_its
         Some("public, max-age=31536000, immutable")
     );
     assert_eq!(missing.status, 404);
+    assert_eq!(
+        missing.header("cache-control"),
+        Some("public, max-age=31536000, immutable")
+    );
+
+    let write = send(
+        port,
+        &format!("POST /nowhere HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+    )
+    .await;
+    assert_eq!(write.status, 405);
+    assert_eq!(write.header("cache-control"), Some("no-cache"));
 }
 
 #[tokio::test]

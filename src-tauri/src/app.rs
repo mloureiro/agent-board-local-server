@@ -103,6 +103,7 @@ pub fn run() {
                     resources: Resources::new(resources),
                     login_name: login_name(),
                     port_override: None,
+                    upstream_override: None,
                     paths: paths.clone(),
                 };
                 match runtime::start(config, lock, Arc::new(Keychain), board.clone()).await {

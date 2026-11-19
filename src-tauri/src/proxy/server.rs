@@ -16,6 +16,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::sleep;
 
 use super::guard::Guard;
 use super::headers::{apply_data, apply_page, ASSET_CACHE, PAGE_CACHE};
@@ -23,6 +24,7 @@ use super::static_files::{content_type, Served, StaticFiles};
 use super::upstream::{Body, Upstream};
 
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
 pub type UpstreamPort = Arc<dyn Fn() -> Option<u16> + Send + Sync>;
 
@@ -107,7 +109,10 @@ async fn accept_loop(listener: TcpListener, state: Arc<State>, mut stopped: watc
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let Ok((stream, peer)) = accepted else { continue };
+                let Ok((stream, peer)) = accepted else {
+                    sleep(ACCEPT_RETRY).await;
+                    continue;
+                };
                 let state = state.clone();
                 connections.spawn(async move {
                     let service = service_fn(move |request| {
@@ -191,19 +196,31 @@ async fn forward(
     }
 }
 
+/// Caddy sets `Cache-Control` per route before the file server answers, so a 404 or a 405 under `/assets/` carries
+/// the asset value and every other static answer carries `no-cache`.
 async fn serve_static(state: &State, method: &Method, path: &str) -> Response<Body> {
+    let cache = HeaderValue::from_static(if path.starts_with("/assets/") {
+        ASSET_CACHE
+    } else {
+        PAGE_CACHE
+    });
+    let plain = |status: StatusCode| {
+        let mut response = answer(status, false);
+        response.headers_mut().insert(CACHE_CONTROL, cache.clone());
+        response
+    };
     if !matches!(*method, Method::GET | Method::HEAD) {
-        let mut response = answer(StatusCode::METHOD_NOT_ALLOWED, false);
+        let mut response = plain(StatusCode::METHOD_NOT_ALLOWED);
         response
             .headers_mut()
             .insert(ALLOW, HeaderValue::from_static("GET, HEAD"));
         return response;
     }
     match state.files.resolve(path) {
-        Served::Refused => answer(StatusCode::BAD_REQUEST, false),
-        Served::NotFound => answer(StatusCode::NOT_FOUND, false),
+        Served::Refused => plain(StatusCode::BAD_REQUEST),
+        Served::NotFound => plain(StatusCode::NOT_FOUND),
         Served::File { path, immutable } => match tokio::fs::read(&path).await {
-            Err(_) => answer(StatusCode::NOT_FOUND, false),
+            Err(_) => plain(StatusCode::NOT_FOUND),
             Ok(content) => {
                 let length = content.len();
                 let body = if *method == Method::HEAD {

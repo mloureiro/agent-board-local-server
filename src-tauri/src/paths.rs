@@ -101,6 +101,10 @@ impl Resources {
         self.root.join("resources/drizzle")
     }
 
+    pub fn frontend(&self) -> PathBuf {
+        self.root.join("resources/frontend")
+    }
+
     pub fn pglite_assets(&self) -> PathBuf {
         self.root.join("resources/pglite")
     }

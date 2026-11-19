@@ -5,3 +5,6 @@ src-tauri/icons/
 .claude/
 wiki/
 .beads/
+.core/
+src-tauri/binaries/
+src-tauri/resources/

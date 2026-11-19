@@ -3,3 +3,6 @@ src-tauri/target/
 src-tauri/gen/
 dist/
 .DS_Store
+.core/
+src-tauri/binaries/
+src-tauri/resources/

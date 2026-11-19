@@ -15,6 +15,12 @@
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
     "macOS": {
       "minimumSystemVersion": "12.0"
-    }
+    },
+    "externalBin": ["binaries/board-server", "binaries/board"],
+    "resources": ["resources/frontend", "resources/drizzle", "resources/pglite", "resources/core-build.json"]
+  },
+  "build": {
+    "beforeDevCommand": "pnpm core:build",
+    "beforeBuildCommand": "pnpm core:build"
   }
 }

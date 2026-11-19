@@ -22,6 +22,7 @@ struct Args {
     upstream: Option<u16>,
     worker: bool,
     enrol_from_stdin: bool,
+    core_dir: PathBuf,
 }
 
 fn loopback_port(url: &str) -> Result<u16, String> {
@@ -36,15 +37,19 @@ fn parse() -> Result<Args, String> {
     let mut upstream = None;
     let mut worker = false;
     let mut enrol_from_stdin = false;
+    let mut core_dir = PathBuf::from(PACKAGING);
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--worker" => worker = true,
             "--enrol-from-stdin" => enrol_from_stdin = true,
-            "--app-root" | "--port" | "--upstream" => {
+            "--app-root" | "--port" | "--upstream" | "--core" => {
                 let value = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
                 match flag.as_str() {
                     "--app-root" => app_root = Some(PathBuf::from(value)),
+                    "--core" => {
+                        core_dir = std::path::absolute(value).map_err(|error| error.to_string())?
+                    }
                     "--port" => {
                         port = Some(
                             value
@@ -66,6 +71,7 @@ fn parse() -> Result<Args, String> {
         upstream,
         worker: worker || enrol_from_stdin,
         enrol_from_stdin,
+        core_dir,
     })
 }
 
@@ -129,8 +135,8 @@ async fn main() {
         app_executable: std::env::current_exe().expect("the runner knows its own path"),
     });
     let config = Config {
-        sidecars: Sidecars::beside(&PathBuf::from(PACKAGING).join("binaries")),
-        resources: Resources::new(PACKAGING),
+        sidecars: Sidecars::beside(&args.core_dir.join("binaries")),
+        resources: Resources::new(&args.core_dir),
         login_name: std::env::var("USER").unwrap_or_else(|_| "user".into()),
         port_override: args.port,
         upstream_override: args.upstream,

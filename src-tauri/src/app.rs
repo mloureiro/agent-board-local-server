@@ -26,10 +26,11 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            let Some(root) = AppPaths::default_root() else {
+            let Some(root) = AppPaths::configured_root() else {
                 eprintln!("HOME is not set; the app root cannot be found");
                 std::process::exit(1);
             };
+            let keychain = Keychain::for_root(&root);
             let paths = AppPaths::new(root);
             let lock = match lock::acquire(&paths.lock_file()) {
                 Ok(lock) => lock,
@@ -94,6 +95,9 @@ pub fn run() {
             });
 
             let handle = app.handle().clone();
+            let keychain = Arc::new(keychain);
+            let worker_secrets = keychain.clone();
+            let proxy_secrets = keychain;
             tauri::async_runtime::spawn(async move {
                 let mut startup = startup;
                 let resources = handle.path().resource_dir().unwrap_or_default();
@@ -110,12 +114,12 @@ pub fn run() {
                     worker: std::env::current_exe()
                         .ok()
                         .map(|app_executable| WorkerConfig {
-                            secrets: Arc::new(Keychain::app()),
+                            secrets: worker_secrets,
                             app_executable,
                         }),
                     paths: paths.clone(),
                 };
-                match runtime::start(config, lock, Arc::new(Keychain::app()), board.clone()).await {
+                match runtime::start(config, lock, proxy_secrets, board.clone()).await {
                     Ok(running) => {
                         apply_autostart(&handle, &paths);
                         *startup = Some(running);
@@ -166,7 +170,8 @@ fn quit_app(app: &AppHandle) {
 
 /// A development build would register a login item that points into the build directory.
 fn apply_autostart(app: &AppHandle, paths: &AppPaths) {
-    if cfg!(debug_assertions) {
+    // The login item starts the app without the root variable, so a moved root must not touch it.
+    if cfg!(debug_assertions) || AppPaths::default_root().as_deref() != Some(paths.root()) {
         return;
     }
     use tauri_plugin_autostart::ManagerExt;

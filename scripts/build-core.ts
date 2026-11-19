@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   BUILD_MANIFEST,
@@ -10,6 +10,7 @@ import {
   isBuildCurrent,
   bunVersionError,
   missingTools,
+  parseBuildArgs,
   parseCoreBuild,
   parsePinnedBun,
   type ToolAvailability,
@@ -39,13 +40,13 @@ function listFiles(dir: string): string[] {
   );
 }
 
-function hashStaged(): Record<string, string> {
-  const manifestPath = join(tauriDir, BUILD_MANIFEST);
-  const files = [...listFiles(join(tauriDir, 'binaries')), ...listFiles(join(tauriDir, 'resources'))]
+function hashStaged(stageDir: string): Record<string, string> {
+  const manifestPath = join(stageDir, BUILD_MANIFEST);
+  const files = [...listFiles(join(stageDir, 'binaries')), ...listFiles(join(stageDir, 'resources'))]
     .filter((file) => file !== manifestPath)
     .sort();
   return Object.fromEntries(
-    files.map((file) => [relative(tauriDir, file), createHash('sha256').update(readFileSync(file)).digest('hex')]),
+    files.map((file) => [relative(stageDir, file), createHash('sha256').update(readFileSync(file)).digest('hex')]),
   );
 }
 
@@ -55,9 +56,9 @@ const recipeFingerprint = (): string => {
   return hash.digest('hex');
 };
 
-function readRecordedBuild(): CoreBuild | null {
+function readRecordedBuild(stageDir: string): CoreBuild | null {
   try {
-    return parseCoreBuild(JSON.parse(readFileSync(join(tauriDir, BUILD_MANIFEST), 'utf8')));
+    return parseCoreBuild(JSON.parse(readFileSync(join(stageDir, BUILD_MANIFEST), 'utf8')));
   } catch {
     return null;
   }
@@ -85,34 +86,37 @@ function materialise(repository: string, commit: string): string {
   return dir;
 }
 
-function stage(coreDir: string, serverBinary: string, cliBinary: string): void {
-  rmSync(join(tauriDir, 'binaries'), { recursive: true, force: true });
-  rmSync(join(tauriDir, 'resources'), { recursive: true, force: true });
-  mkdirSync(join(tauriDir, 'binaries'), { recursive: true });
+function stage(stageDir: string, coreDir: string, serverBinary: string, cliBinary: string): void {
+  rmSync(join(stageDir, 'binaries'), { recursive: true, force: true });
+  rmSync(join(stageDir, 'resources'), { recursive: true, force: true });
+  mkdirSync(join(stageDir, 'binaries'), { recursive: true });
   for (const step of stagingPlan()) {
     const source = join(coreDir, step.from);
     if (!existsSync(source)) throw new Error(`The core build did not produce ${step.from}`);
-    const target = join(tauriDir, step.to);
+    const target = join(stageDir, step.to);
     mkdirSync(dirname(target), { recursive: true });
     cpSync(source, target, { recursive: true });
   }
-  cpSync(serverBinary, join(tauriDir, stagedBinaries.server));
-  cpSync(cliBinary, join(tauriDir, stagedBinaries.cli));
+  cpSync(serverBinary, join(stageDir, stagedBinaries.server));
+  cpSync(cliBinary, join(stageDir, stagedBinaries.cli));
   for (const binary of Object.values(stagedBinaries))
-    run('codesign', ['--force', '--sign', '-', join(tauriDir, binary)], root);
+    run('codesign', ['--force', '--sign', '-', join(stageDir, binary)], root);
 }
 
 function main(): void {
+  const args = parseBuildArgs(process.argv.slice(2));
+  const pinFile = args.pin === null ? join(root, 'core.pin.json') : resolve(args.pin);
+  const stageDir = args.out === null ? tauriDir : resolve(args.out);
   const found: ToolAvailability = { git: hasTool('git'), pnpm: hasTool('pnpm'), bun: hasTool('bun') };
   const missing = missingTools(found);
   if (missing.length > 0) throw new Error(`core:build needs ${missing.join(', ')} on PATH`);
 
-  const pin = parseCorePin(JSON.parse(readFileSync(join(root, 'core.pin.json'), 'utf8')));
+  const pin = parseCorePin(JSON.parse(readFileSync(pinFile, 'utf8')));
   const bun = output('bun', ['--version']);
 
   const recipe = recipeFingerprint();
 
-  if (isBuildCurrent(readRecordedBuild(), { commit: pin.commit, bun, recipe }, hashStaged())) {
+  if (isBuildCurrent(readRecordedBuild(stageDir), { commit: pin.commit, bun, recipe }, hashStaged(stageDir))) {
     console.log(`The core at ${pin.commit} is already built and staged`);
     return;
   }
@@ -144,10 +148,10 @@ function main(): void {
   );
   run('./build.sh', [CLI_TARGET], join(coreDir, 'apps/cli'), { ...process.env, DIST_DIR: cliOut });
 
-  stage(coreDir, serverBinary, join(cliOut, `board-${CLI_TARGET}`));
+  stage(stageDir, coreDir, serverBinary, join(cliOut, `board-${CLI_TARGET}`));
 
-  const build: CoreBuild = { commit: pin.commit, bun, recipe, files: hashStaged() };
-  writeFileSync(join(tauriDir, BUILD_MANIFEST), `${JSON.stringify(build, null, 2)}\n`);
+  const build: CoreBuild = { commit: pin.commit, bun, recipe, files: hashStaged(stageDir) };
+  writeFileSync(join(stageDir, BUILD_MANIFEST), `${JSON.stringify(build, null, 2)}\n`);
   console.log(`Staged the core at ${pin.commit}`);
 }
 

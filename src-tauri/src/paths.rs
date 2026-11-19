@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 pub const APP_IDENTIFIER: &str = "dev.mloureiro.agent-board-local-server";
+pub const ROOT_ENV: &str = "AGENT_BOARD_LOCAL_SERVER_ROOT";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -19,6 +20,15 @@ impl AppPaths {
                 .join("Library/Application Support")
                 .join(APP_IDENTIFIER),
         )
+    }
+
+    /// `AGENT_BOARD_LOCAL_SERVER_ROOT` moves every file of the app to another folder, so a build can run
+    /// beside an installed one; the Keychain items move with it (see `Keychain::for_root`).
+    pub fn configured_root() -> Option<PathBuf> {
+        match std::env::var_os(ROOT_ENV) {
+            Some(root) if !root.is_empty() => std::path::absolute(root).ok(),
+            _ => Self::default_root(),
+        }
     }
 
     pub fn root(&self) -> &Path {

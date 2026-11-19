@@ -1,6 +1,6 @@
 {
   "repository": "mloureiro/agent-board",
-  "commit": "a35c5ac20fb23318c05f18b43789dc02bd3a4421",
+  "commit": "1fd25da1b7c36266507e64400c0f43b6f0d01a21",
   "branch": "local-server",
   "includes": [
     { "branch": "feat/agent-board-local-server-6h4/listen-host", "commit": "72ad101dba00b800ede728a07409a39b1ac05606" },
@@ -15,7 +15,11 @@
     {
       "branch": "feat/agent-board-local-server-6h4/worker-shutdown",
       "commit": "736399a48f32ac2f508fdde1eca1e456f7340095"
+    },
+    {
+      "branch": "feat/agent-board-local-server-6h4/shutdown-idle-agent",
+      "commit": "ecefdf85adc9854acc84f72da1c98214abdfc319"
     }
   ],
-  "reason": "The fork's local-server branch is upstream 79255ce plus changes a single-machine server needs and upstream does not have yet: listen-host reads the listen address from HOST so the backend can bind to loopback; pglite-driver runs the backend on an in-process PGlite for a pglite:// database URL, with PGLITE_ASSETS_DIR and PGLITE_SHARED_BUFFERS; credentials-command lets the CLI take its token and data key from a command named by AGENT_BOARD_CREDENTIALS_COMMAND; worker-shutdown adds board internal shutdown, which ends a worker and its runs within a grace period."
+  "reason": "The fork's local-server branch is upstream 79255ce plus changes a single-machine server needs and upstream does not have yet: listen-host reads the listen address from HOST so the backend can bind to loopback; pglite-driver runs the backend on an in-process PGlite for a pglite:// database URL, with PGLITE_ASSETS_DIR and PGLITE_SHARED_BUFFERS; credentials-command lets the CLI take its token and data key from a command named by AGENT_BOARD_CREDENTIALS_COMMAND; worker-shutdown adds board internal shutdown, which ends a worker and its runs within a grace period; shutdown-idle-agent makes that shutdown kill an agent that stays alive after its turn ended."
 }

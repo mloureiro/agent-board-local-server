@@ -45,21 +45,67 @@ pub fn apply_data(headers: &mut HeaderMap) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    type Pairs = BTreeSet<(String, String)>;
+
+    fn staged_caddyfile() -> String {
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/Caddyfile"))
+            .expect("pnpm core:build stages the Caddyfile")
+    }
+
+    fn pair(line: &str) -> Option<(String, String)> {
+        let line = line.trim().trim_start_matches('>');
+        let (name, rest) = line.split_once(' ')?;
+        let value = rest.trim().strip_prefix('"')?.strip_suffix('"')?;
+        Some((name.to_ascii_lowercase(), value.to_string()))
+    }
+
+    fn block_after(caddyfile: &str, marker: &str) -> Pairs {
+        let mut lines = caddyfile
+            .lines()
+            .skip_while(|line| line.trim() != marker)
+            .skip_while(|line| line.trim() != "header {")
+            .skip(1);
+        let mut found = Pairs::new();
+        for line in lines.by_ref().take_while(|line| line.trim() != "}") {
+            found.insert(pair(line).unwrap_or_else(|| panic!("unreadable header line: {line}")));
+        }
+        found
+    }
+
+    fn cache_controls(caddyfile: &str) -> BTreeSet<String> {
+        caddyfile
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("header Cache-Control "))
+            .map(|value| value.trim_matches('"').to_string())
+            .collect()
+    }
+
+    fn table(entries: &[(&str, &str)]) -> Pairs {
+        entries
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    fn drift(caddyfile: &str) -> Vec<&'static str> {
+        let mut differing = Vec::new();
+        if block_after(caddyfile, ":8080 {") != table(PAGE) {
+            differing.push("page headers");
+        }
+        if block_after(caddyfile, "(data_headers) {") != table(DATA) {
+            differing.push("data headers");
+        }
+        if cache_controls(caddyfile) != BTreeSet::from([ASSET_CACHE.into(), PAGE_CACHE.into()]) {
+            differing.push("cache control");
+        }
+        differing
+    }
 
     #[test]
-    fn the_tables_match_the_pinned_caddyfile_and_the_data_set_wins_on_overlap() {
-        let caddyfile =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/Caddyfile"))
-                .expect("pnpm core:build stages the Caddyfile");
-        for (_, value) in PAGE.iter().chain(DATA) {
-            assert!(
-                caddyfile.contains(&format!("\"{value}\"")),
-                "{value} is not in the pinned Caddyfile"
-            );
-        }
-        for value in [ASSET_CACHE, PAGE_CACHE] {
-            assert!(caddyfile.contains(&format!("\"{value}\"")));
-        }
+    fn the_tables_equal_the_pinned_caddyfile_and_the_data_set_wins_on_overlap() {
+        assert_eq!(drift(&staged_caddyfile()), Vec::<&str>::new());
 
         let mut headers = HeaderMap::new();
         apply_page(&mut headers);
@@ -69,5 +115,25 @@ mod tests {
             "sandbox; default-src 'none'"
         );
         assert_eq!(headers["referrer-policy"], "no-referrer");
+    }
+
+    #[test]
+    fn a_changed_added_or_dropped_caddyfile_header_is_drift() {
+        let pinned = staged_caddyfile();
+        let downgraded = pinned.replace(
+            "Cross-Origin-Opener-Policy \"same-origin\"",
+            "Cross-Origin-Opener-Policy \"unsafe-none\"",
+        );
+        let added = pinned.replace(
+            "\t\t>Cache-Control \"no-store\"\n",
+            "\t\t>Cache-Control \"no-store\"\n\t\t>Permissions-Policy \"camera=()\"\n",
+        );
+        let dropped = pinned.replace("\t\tReferrer-Policy \"no-referrer\"\n", "");
+        let recached = pinned.replace("\"no-cache\"", "\"max-age=60\"");
+
+        assert_eq!(drift(&downgraded), ["page headers"]);
+        assert_eq!(drift(&added), ["data headers"]);
+        assert_eq!(drift(&dropped), ["page headers"]);
+        assert_eq!(drift(&recached), ["cache control"]);
     }
 }

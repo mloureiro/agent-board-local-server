@@ -16,6 +16,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::sleep;
 
 use super::guard::Guard;
 use super::headers::{apply_data, apply_page, ASSET_CACHE, PAGE_CACHE};
@@ -23,6 +24,7 @@ use super::static_files::{content_type, Served, StaticFiles};
 use super::upstream::{Body, Upstream};
 
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
 pub type UpstreamPort = Arc<dyn Fn() -> Option<u16> + Send + Sync>;
 
@@ -107,7 +109,10 @@ async fn accept_loop(listener: TcpListener, state: Arc<State>, mut stopped: watc
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let Ok((stream, peer)) = accepted else { continue };
+                let Ok((stream, peer)) = accepted else {
+                    sleep(ACCEPT_RETRY).await;
+                    continue;
+                };
                 let state = state.clone();
                 connections.spawn(async move {
                     let service = service_fn(move |request| {

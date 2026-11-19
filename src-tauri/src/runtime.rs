@@ -63,6 +63,8 @@ impl fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
+pub type Running = Arc<tokio::sync::Mutex<Option<Handle>>>;
+
 pub struct Handle {
     stop_worker: watch::Sender<bool>,
     stop_proxy: watch::Sender<bool>,

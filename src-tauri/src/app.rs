@@ -1,21 +1,16 @@
 use std::sync::Arc;
 
-use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, RunEvent};
 use tokio::sync::Mutex;
 
 use crate::lock::{self, LockError};
 use crate::paths::{AppPaths, Resources, Sidecars};
-use crate::runtime::{self, Config, Handle, WorkerConfig, BACKEND, PROXY};
+use crate::runtime::{self, Config, Running, WorkerConfig};
 use crate::secrets::Keychain;
 use crate::settings::Settings;
 use crate::supervisor::StatusBoard;
-use crate::worker::processes::{DISPATCH, WORKER_LISTEN, WORKER_WATCH};
-
-const QUIT: &str = "quit";
-
-type Running = Arc<Mutex<Option<Handle>>>;
+use crate::tray::{abort_dialogs, handle_click, TrayMenu, QUIT};
 
 fn login_name() -> String {
     std::env::var("USER").unwrap_or_else(|_| "user".into())
@@ -45,43 +40,7 @@ pub fn run() {
                 }
             };
 
-            let status =
-                MenuItem::with_id(app, "status", "Backend: starting", false, None::<&str>)?;
-            let quit = MenuItem::with_id(app, QUIT, "Quit", true, None::<&str>)?;
-            let proxy_status =
-                MenuItem::with_id(app, "proxy-status", "Proxy: waiting", false, None::<&str>)?;
-            let listener_status = MenuItem::with_id(
-                app,
-                "worker-listen-status",
-                "Worker listener: waiting",
-                false,
-                None::<&str>,
-            )?;
-            let watch_status = MenuItem::with_id(
-                app,
-                "worker-watch-status",
-                "Worker watch: waiting",
-                false,
-                None::<&str>,
-            )?;
-            let tick_status = MenuItem::with_id(
-                app,
-                "dispatch-status",
-                "Last dispatch tick: none yet",
-                false,
-                None::<&str>,
-            )?;
-            let menu = Menu::with_items(
-                app,
-                &[
-                    &status,
-                    &proxy_status,
-                    &listener_status,
-                    &watch_status,
-                    &tick_status,
-                    &quit,
-                ],
-            )?;
+            let tray_menu = Arc::new(TrayMenu::build(app.handle())?);
 
             let board = Arc::new(StatusBoard::default());
             let running: Running = Arc::new(Mutex::new(None));
@@ -89,16 +48,20 @@ pub fn run() {
                 .clone()
                 .try_lock_owned()
                 .expect("nobody else holds the lock yet");
-            app.manage(running);
+            app.manage(running.clone());
 
+            let clicked_board = board.clone();
+            let clicked_running = running.clone();
             TrayIconBuilder::new()
                 .icon(tauri::include_image!("icons/tray.png"))
                 .icon_as_template(true)
                 .tooltip("agent-board local server")
-                .menu(&menu)
-                .on_menu_event(|app, event| {
+                .menu(tray_menu.menu())
+                .on_menu_event(move |app, event| {
                     if event.id().as_ref() == QUIT {
                         quit_app(app);
+                    } else {
+                        handle_click(event.id().as_ref(), &clicked_board, &clicked_running);
                     }
                 })
                 .build(app)?;
@@ -107,21 +70,7 @@ pub fn run() {
             let reader = board.clone();
             tauri::async_runtime::spawn(async move {
                 while changes.changed().await.is_ok() {
-                    for (name, title, item) in [
-                        (BACKEND, "Backend", &status),
-                        (PROXY, "Proxy", &proxy_status),
-                        (WORKER_LISTEN, "Worker listener", &listener_status),
-                        (WORKER_WATCH, "Worker watch", &watch_status),
-                        (DISPATCH, "Last dispatch tick", &tick_status),
-                    ] {
-                        if let Some(current) = reader.get(name) {
-                            let label = current.label(title);
-                            if item.text().ok().as_deref() != Some(label.as_str()) {
-                                eprintln!("{label}");
-                                let _ = item.set_text(label);
-                            }
-                        }
-                    }
+                    tray_menu.refresh(&reader);
                 }
             });
 
@@ -205,6 +154,7 @@ fn stop_before_exit(app: &AppHandle) {
 fn quit_app(app: &AppHandle) {
     let running = app.state::<Running>().inner().clone();
     let app = app.clone();
+    abort_dialogs();
     tauri::async_runtime::spawn(async move {
         if let Some(handle) = running.lock().await.take() {
             handle.stop().await;

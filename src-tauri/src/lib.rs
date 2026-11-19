@@ -7,6 +7,7 @@ pub mod runtime;
 pub mod secrets;
 pub mod settings;
 pub mod supervisor;
+pub mod tray;
 pub mod worker;
 
 pub use app::run;

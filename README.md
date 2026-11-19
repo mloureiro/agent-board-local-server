@@ -4,7 +4,9 @@ A macOS menu-bar app that runs an [agent-board](https://github.com/mloureiro/age
 
 It packages the agent-board core at the commit named in `core.pin.json` and holds no server code of its own. A change to server behaviour is made in the core, and this repository then moves its pin.
 
-Today the app is a shell: a tray icon with a menu and no window. It does not start the server yet.
+Today the app starts the backend (PGlite in process, loopback only) as a supervised sidecar, restarts it after a crash (1 s, 5 s, 25 s, then it stays down), shows its state in the tray and stops it on Quit. The proxy and the worker are not wired yet.
+
+The app keeps its files under `~/Library/Application Support/dev.mloureiro.agent-board-local-server/`: `settings.json` (`userName`, `dataDir`, `port`, `startAtLogin`; read at start and never rewritten), `logs/`, `run/` and the data folder. The proxy secret lives in the login Keychain. `cargo run --example headless -- --app-root <dir>` runs the same runtime without the tray until SIGTERM.
 
 ## Requirements
 

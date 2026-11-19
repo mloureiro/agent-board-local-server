@@ -17,7 +17,9 @@
     "typecheck": "tsc -p tsconfig.json && cargo check --manifest-path src-tauri/Cargo.toml --all-targets",
     "test": "vitest --run && cargo test --manifest-path src-tauri/Cargo.toml",
     "test:smoke": "vitest --run --config vitest.smoke.config.ts",
-    "core:build": "node scripts/build-core.ts"
+    "core:build": "node scripts/build-core.ts",
+    "acceptance": "node scripts/acceptance.ts",
+    "acceptance:binary": "bun build scripts/acceptance.ts --compile --target=bun-darwin-arm64 --outfile dist/acceptance"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
 use std::sync::Mutex;
 
-use crate::paths::APP_IDENTIFIER;
+use crate::paths::{AppPaths, APP_IDENTIFIER};
 
 pub const PROXY_SECRET: &str = "proxy-secret";
 
@@ -30,6 +31,16 @@ pub struct Keychain {
 impl Keychain {
     pub fn app() -> Self {
         Self::with_service(APP_IDENTIFIER)
+    }
+
+    /// Any root other than the default gets a Keychain service of its own, so a scratch root never reads,
+    /// replaces or deletes the installed app's items.
+    pub fn for_root(root: &Path) -> Self {
+        if AppPaths::default_root().as_deref() == Some(root) {
+            Self::app()
+        } else {
+            Self::with_service(format!("{APP_IDENTIFIER}.root:{}", root.display()))
+        }
     }
 
     pub fn with_service(service: impl Into<String>) -> Self {
@@ -153,5 +164,14 @@ mod tests {
         assert_eq!(first.len(), 64);
         assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(proxy_secret(&store).unwrap(), first);
+    }
+
+    #[test]
+    fn only_the_default_root_uses_the_installed_apps_keychain_service() {
+        let default = AppPaths::default_root().expect("HOME is set in the test environment");
+        assert_eq!(Keychain::for_root(&default).service, APP_IDENTIFIER);
+        let scratch = Keychain::for_root(Path::new("/tmp/scratch-root")).service;
+        assert_ne!(scratch, APP_IDENTIFIER);
+        assert!(scratch.ends_with(":/tmp/scratch-root"));
     }
 }

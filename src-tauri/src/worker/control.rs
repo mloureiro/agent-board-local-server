@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 
-use super::credentials::{discard_pending, enrolled};
+use super::credentials::{discard_pending, enrolled, pending_present};
 use super::enrol::{enrol, BoardInit, EnrolError, InitRunner};
 use super::layout;
 use super::processes::{Processes, WorkerSetup, WORKER_LISTEN};
@@ -121,7 +121,12 @@ impl WorkerControl {
         let Some(url) = self.proxy_url() else {
             return Err(EnrolError::new("the board is not running yet"));
         };
-        enrol(
+        let was_started = state.started;
+        if was_started {
+            self.processes.stop().await;
+            state.started = false;
+        }
+        let outcome = enrol(
             self.secrets.as_ref(),
             &self.init,
             &url,
@@ -129,13 +134,21 @@ impl WorkerControl {
             token,
             data_key,
         )
-        .await?;
-        if state.started {
-            self.processes.stop().await;
-            state.started = false;
+        .await;
+        match outcome {
+            Ok(()) => self.connect(&mut state, &url).await,
+            Err(_) if was_started => self.resume_with_enrolled_pair(&mut state, &url).await,
+            Err(_) => {}
         }
-        self.connect(&mut state, &url).await;
-        Ok(())
+        outcome
+    }
+
+    async fn resume_with_enrolled_pair(&self, state: &mut State, url: &str) {
+        match pending_present(self.secrets.as_ref()) {
+            Ok(false) => self.connect(state, url).await,
+            Ok(true) => self.blocked("a refused credential pair is still in the Keychain".into()),
+            Err(error) => self.blocked(error.to_string()),
+        }
     }
 
     pub async fn stop(&self) {

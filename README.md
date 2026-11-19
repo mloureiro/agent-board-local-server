@@ -8,6 +8,10 @@ Today the app starts the backend (PGlite in process, loopback only) as a supervi
 
 The app keeps its files under `~/Library/Application Support/dev.mloureiro.agent-board-local-server/`: `settings.json` (`userName`, `dataDir`, `port`, `startAtLogin`; read at start and never rewritten), `logs/`, `run/`, `worker/` and the data folder. The proxy secret, the machine token and the data key live in the login Keychain and nowhere else. `cargo run --example headless -- --app-root <dir>` runs the same runtime without the tray until SIGTERM.
 
+## The tray
+
+The app has no window and no Dock icon. The menu has "Open board", one line per process, "Connect worker…" and "Quit"; "Open board" and "Connect worker…" are enabled once the proxy runs. "Open board" hands `http://127.0.0.1:<port>/` to the desktop client (bundle identifier `com.mloureiro.agent-board-client`) when macOS knows an application with that identifier, and otherwise opens it in the default browser. The client does not act on the URL yet, so today it only comes forward. The board's keys live where it is opened: the client and each browser unlock once with the passphrase.
+
 ## The worker
 
 The worker is the bundled `board` CLI. The app runs `board internal listen` and `board internal watch` itself and a dispatch tick at start and every two minutes; it installs nothing with launchd. Its files sit apart from the core's defaults, under `worker/`:
@@ -18,7 +22,9 @@ The worker is the bundled `board` CLI. The app runs `board internal listen` and 
 
 The `PATH` the worker gets is written out by the app (`worker/bin`, `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and the system directories), so `claude` and `gh` are found when the app is started from Finder.
 
-Until the machine is enrolled the tray shows "Worker not connected". Enrolling stores the machine token and the data key from the board's Settings page as pending Keychain items, lets `board init` check them against the board and, only when it accepts them, keeps them. The first-run dialogs that collect the two values come with the tray; `enrol` is also available to the headless runner, which reads the two lines from stdin so that neither value appears on a command line:
+Until the machine is enrolled the tray shows "Worker not connected". "Connect worker…" (later "Reconnect worker…") shows two native macOS dialogs, one for the machine token and one for the data key, both from the board's Settings page; typing is hidden and Cancel stores nothing. The app stores the two values as pending Keychain items, lets `board init` check them against the board and, only when it accepts them, keeps them. A refusal is shown with `board init`'s own message and a "Try again" button. Reconnecting stops the worker first, so nothing runs while the new pair is checked, and starts it again with whichever pair ends up enrolled.
+
+The headless runner reads the same pair from stdin, so that neither value appears on a command line, and keeps reading further pairs as re-enrolments:
 
 ```sh
 cargo run --example headless -- --app-root <dir> --port <port> --enrol-from-stdin

@@ -4,9 +4,37 @@ A macOS menu-bar app that runs an [agent-board](https://github.com/mloureiro/age
 
 It packages the agent-board core at the commit named in `core.pin.json` and holds no server code of its own. A change to server behaviour is made in the core, and this repository then moves its pin.
 
-Today the app starts the backend (PGlite in process, loopback only) as a supervised sidecar, restarts it after a crash (1 s, 5 s, 25 s, then it stays down), shows its state in the tray and stops it on Quit. The proxy and the worker are not wired yet.
+Today the app starts the backend (PGlite in process, loopback only) as a supervised sidecar, serves the board through its own proxy and, once enrolled, runs the worker. A crashed process is restarted after 1 s, 5 s and 25 s and then stays down. The tray shows the state of each process and stops everything on Quit, on SIGTERM, SIGINT and SIGHUP, and on any other exit of the app (the system ending it at log out, for one) that still finds something running.
 
-The app keeps its files under `~/Library/Application Support/dev.mloureiro.agent-board-local-server/`: `settings.json` (`userName`, `dataDir`, `port`, `startAtLogin`; read at start and never rewritten), `logs/`, `run/` and the data folder. The proxy secret lives in the login Keychain. `cargo run --example headless -- --app-root <dir>` runs the same runtime without the tray until SIGTERM.
+The app keeps its files under `~/Library/Application Support/dev.mloureiro.agent-board-local-server/`: `settings.json` (`userName`, `dataDir`, `port`, `startAtLogin`; read at start and never rewritten), `logs/`, `run/`, `worker/` and the data folder. The proxy secret, the machine token and the data key live in the login Keychain and nowhere else. `cargo run --example headless -- --app-root <dir>` runs the same runtime without the tray until SIGTERM.
+
+## The worker
+
+The worker is the bundled `board` CLI. The app runs `board internal listen` and `board internal watch` itself and a dispatch tick at start and every two minutes; it installs nothing with launchd. Its files sit apart from the core's defaults, under `worker/`:
+
+- `worker/config/` (`AGENT_BOARD_CONFIG_DIR`: `web.json`, `config.json`), `worker/state/` (`AGENT_BOARD_STATE_DIR`: run logs, sessions) and `worker/run/` (`AGENT_BOARD_RUN_DIR`: pid files, the dispatch lock)
+- `worker/bin/board`, a link to the bundled CLI that comes first on the worker's `PATH`
+- `worker/worker-credentials`, a link to the app's own executable. The CLI runs it as `AGENT_BOARD_CREDENTIALS_COMMAND`; it prints the token and the data key from the Keychain and nothing else, so neither is ever in a file or a process argument.
+
+The `PATH` the worker gets is written out by the app (`worker/bin`, `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and the system directories), so `claude` and `gh` are found when the app is started from Finder.
+
+Until the machine is enrolled the tray shows "Worker not connected". Enrolling stores the machine token and the data key from the board's Settings page as pending Keychain items, lets `board init` check them against the board and, only when it accepts them, keeps them. The first-run dialogs that collect the two values come with the tray; `enrol` is also available to the headless runner, which reads the two lines from stdin so that neither value appears on a command line:
+
+```sh
+cargo run --example headless -- --app-root <dir> --port <port> --enrol-from-stdin
+```
+
+`--worker` starts an already enrolled worker from that runner's own Keychain items (one Keychain service per app root, so a scratch root never touches the app's items).
+
+On Quit the dispatch tick, the listener and the watch unit get SIGTERM, then the running cards are asked to pause through `board internal shutdown --grace 20`, which leaves them resumable on this machine, then any worker still left is killed, and only then do the proxy and the backend stop. The whole sequence takes about 30 s at most.
+
+To use the bundled CLI by hand (to add directories or lanes, for example), give it the worker's directories and the credentials link:
+
+```sh
+R="$HOME/Library/Application Support/dev.mloureiro.agent-board-local-server/worker"
+AGENT_BOARD_CONFIG_DIR="$R/config" AGENT_BOARD_STATE_DIR="$R/state" AGENT_BOARD_RUN_DIR="$R/run" \
+  AGENT_BOARD_CREDENTIALS_COMMAND="$R/worker-credentials" "$R/bin/board" dirs
+```
 
 ## Requirements
 

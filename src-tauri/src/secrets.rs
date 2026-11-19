@@ -95,6 +95,42 @@ impl SecretStore for MemoryStore {
     }
 }
 
+#[cfg(test)]
+pub mod testing {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::{MemoryStore, SecretError, SecretStore};
+
+    #[derive(Default)]
+    pub struct DeletesFailWhenArmed {
+        inner: MemoryStore,
+        armed: AtomicBool,
+    }
+
+    impl DeletesFailWhenArmed {
+        pub fn arm(&self) {
+            self.armed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl SecretStore for DeletesFailWhenArmed {
+        fn get(&self, account: &str) -> Result<Option<String>, SecretError> {
+            self.inner.get(account)
+        }
+
+        fn set(&self, account: &str, value: &str) -> Result<(), SecretError> {
+            self.inner.set(account, value)
+        }
+
+        fn delete(&self, account: &str) -> Result<(), SecretError> {
+            if self.armed.load(Ordering::SeqCst) {
+                return Err(SecretError("locked".into()));
+            }
+            self.inner.delete(account)
+        }
+    }
+}
+
 /// The secret the backend trusts the proxy's headers with; created once per install.
 pub fn proxy_secret(store: &dyn SecretStore) -> Result<String, SecretError> {
     if let Some(existing) = store.get(PROXY_SECRET)? {

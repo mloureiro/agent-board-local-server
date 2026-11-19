@@ -77,6 +77,10 @@ pub struct Handle {
 }
 
 impl Handle {
+    pub fn worker(&self) -> Option<Arc<WorkerControl>> {
+        self.worker.clone()
+    }
+
     pub async fn enrol(&self, token: &str, data_key: &str) -> Result<(), EnrolError> {
         match &self.worker {
             Some(worker) => worker.enrol(token, data_key).await,

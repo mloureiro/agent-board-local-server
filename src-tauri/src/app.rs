@@ -140,6 +140,7 @@ pub fn run() {
 /// The system can end the app without a Quit click (log out, restart, a terminate request); the processes it
 /// started must not outlive it, so whatever Quit has not already stopped is stopped here.
 fn stop_before_exit(app: &AppHandle) {
+    abort_dialogs();
     let Some(running) = app.try_state::<Running>() else {
         return;
     };

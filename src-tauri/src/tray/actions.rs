@@ -6,7 +6,7 @@ use tauri::async_runtime::JoinHandle;
 use super::enrol_dialog::{connect_worker, Enroller, Osascript};
 use super::menu::{proxy_port, CONNECT_WORKER, OPEN_BOARD};
 use super::open_board::open_board;
-use crate::runtime::{Running, PROXY};
+use crate::runtime::{Handle, Running, PROXY};
 use crate::supervisor::StatusBoard;
 use crate::worker::enrol::EnrolError;
 
@@ -17,8 +17,9 @@ struct RunningWorker(Running);
 
 impl Enroller for RunningWorker {
     async fn enrol(&self, token: &str, data_key: &str) -> Result<(), EnrolError> {
-        match self.0.lock().await.as_ref() {
-            Some(handle) => handle.enrol(token, data_key).await,
+        let worker = self.0.lock().await.as_ref().and_then(Handle::worker);
+        match worker {
+            Some(worker) => worker.enrol(token, data_key).await,
             None => Err(EnrolError::new("the app is quitting")),
         }
     }

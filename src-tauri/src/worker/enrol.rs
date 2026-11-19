@@ -226,6 +226,7 @@ fn with_cleanup(error: EnrolError, store: &dyn SecretStore) -> EnrolError {
 mod tests {
     use std::sync::Mutex;
 
+    use crate::secrets::testing::DeletesFailWhenArmed;
     use crate::secrets::MemoryStore;
     use crate::worker::credentials::{helper_output, TOKEN_ACCOUNT};
 
@@ -289,45 +290,18 @@ mod tests {
         );
     }
 
-    struct DeletesFailWhenArmed {
-        inner: MemoryStore,
-        armed: std::sync::atomic::AtomicBool,
-    }
-
-    impl SecretStore for DeletesFailWhenArmed {
-        fn get(&self, account: &str) -> Result<Option<String>, SecretError> {
-            self.inner.get(account)
-        }
-
-        fn set(&self, account: &str, value: &str) -> Result<(), SecretError> {
-            self.inner.set(account, value)
-        }
-
-        fn delete(&self, account: &str) -> Result<(), SecretError> {
-            if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(SecretError("locked".into()));
-            }
-            self.inner.delete(account)
-        }
-    }
-
     struct ArmsTheStore(std::sync::Arc<DeletesFailWhenArmed>);
 
     impl InitRunner for ArmsTheStore {
         async fn run_init(&self, _url: &str, _machine: &str) -> Result<(), String> {
-            self.0
-                .armed
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.0.arm();
             Err("refused".into())
         }
     }
 
     #[tokio::test]
     async fn a_refused_pair_that_cannot_be_removed_is_reported_and_still_visible_as_pending() {
-        let store = std::sync::Arc::new(DeletesFailWhenArmed {
-            inner: MemoryStore::default(),
-            armed: false.into(),
-        });
+        let store = std::sync::Arc::new(DeletesFailWhenArmed::default());
 
         let error = enrol(
             store.as_ref(),

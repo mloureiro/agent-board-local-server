@@ -8,6 +8,30 @@ Today the app starts the backend (PGlite in process, loopback only) as a supervi
 
 The app keeps its files under `~/Library/Application Support/dev.mloureiro.agent-board-local-server/`: `settings.json` (`userName`, `dataDir`, `port`, `startAtLogin`; read at start and never rewritten), `logs/`, `run/`, `worker/` and the data folder. The proxy secret, the machine token and the data key live in the login Keychain and nowhere else. `cargo run --example headless -- --app-root <dir>` runs the same runtime without the tray until SIGTERM.
 
+## On disk, keys and what is stored in plain form
+
+```
+~/Library/Application Support/dev.mloureiro.agent-board-local-server/
+  settings.json    userName, dataDir, port, startAtLogin (read at start, never rewritten)
+  app.lock         one app at a time
+  logs/            backend and proxy output
+  run/             pid files of the supervised processes
+  data/pglite/     the database (the default dataDir)
+  worker/          config/, state/, run/, bin/board, worker-credentials
+```
+
+Settings keys, all optional: `userName` (default the macOS login name, the board user), `dataDir` (default `data/` under the app folder), `port` (default 4785; it is part of the origin the browser keeps its keys under, so it should not change), `startAtLogin` (default true; the release build registers a login item, a debug build never does). A malformed or out-of-range value stops the app with a message instead of being replaced by a default.
+
+`AGENT_BOARD_LOCAL_SERVER_ROOT` moves the whole app folder, for running a build beside an installed one. Any root other than the default also gets its own Keychain service and leaves the login item alone.
+
+**Keys.** The board's content is sealed in the browser with a data key that the passphrase and the recovery key unlock; the server only stores sealed text and a wrapped copy of the key. The app never holds that key. The worker needs it to seal and open content, so "Connect worker…" takes it, with a machine token, and stores both in the login Keychain; the CLI reads them through the credentials helper and neither reaches a file or a process argument. The proxy secret lives in the Keychain too.
+
+**Stored unsealed.** `at-rest/plain-columns.json` lists every database column that is not sealed, each with its reason, and the smoke suite fails when a column is neither sealed nor listed. In short: ids, timestamps, the login name, workflow states and flags from fixed lists (status, priority, lane, model name, who moved a card), scheduling numbers and cron expressions, worker machine names, the Claude session id (a pointer, not the transcript) and the wrapped data key. Titles, prompts, notes, transcripts, directories and watches are sealed. `scripts/acceptance.ts` searches a copy of the data folder for a marker typed into a card as UTF-8 and UTF-16.
+
+**Plain and outside the data folder.** The worker's run logs under `worker/state/` and Claude Code's own session transcripts under `~/.claude/` hold the text of runs in plain form, as they do for any core worker; they are not covered by the data folder's protection. The folder holds nothing a stolen copy of it could read as content, but the Mac's disk encryption is what protects those two.
+
+**Keychain prompt after a rebuild.** The `.app` is ad-hoc signed, so every rebuild has a new code identity and macOS can ask again for permission to read the existing Keychain items. Choose "Always Allow", or the worker stays disconnected until you do.
+
 ## The tray
 
 The app has no window and no Dock icon. The menu has "Open board", one line per process, "Connect worker…" and "Quit"; "Open board" and "Connect worker…" are enabled once the proxy runs. "Open board" hands `http://127.0.0.1:<port>/` to the desktop client (bundle identifier `com.mloureiro.agent-board-client`) when macOS knows an application with that identifier, and otherwise opens it in the default browser. The client does not act on the URL yet, so today it only comes forward. The board's keys live where it is opened: the client and each browser unlock once with the passphrase.
@@ -54,13 +78,24 @@ AGENT_BOARD_CONFIG_DIR="$R/config" AGENT_BOARD_STATE_DIR="$R/state" AGENT_BOARD_
 pnpm install
 pnpm core:build     # build the pinned core and stage it for the app
 pnpm dev            # run the app from source (builds the core first)
-pnpm build          # build the unsigned .app into src-tauri/target/release/bundle/macos
+pnpm build          # build the ad-hoc signed .app into src-tauri/target/release/bundle/macos
 pnpm format:check
 pnpm lint
 pnpm typecheck
 pnpm test
 pnpm test:smoke     # black-box suite against the built sidecar; run pnpm core:build first
+pnpm acceptance     # checks the built .app on a scratch app root; see below
 ```
+
+## Acceptance
+
+`pnpm acceptance [--app <path>] [--root <dir>|default] [--port <n>] [--skip-marker] [--keep]` starts the built `.app` on a scratch app root (a new folder and port, `startAtLogin` off, its own Keychain service) and prints one PASS, FAIL or INFO line per check: bundle layout and part sizes, the ad-hoc signature, `/healthz`, AC13 (the board page on `localhost`), AC4 (every listener of the app's process tree is loopback), AC8 (the worker folders exist and are not the core's defaults) and idle memory (resident size and physical footprint of the app and `board-server`). Unless `--skip-marker` is given it then prints a random marker, waits for a card carrying it in title and prompt (set up encryption and create it in the browser), quits the app, and checks AC6 (no process from the bundle or the worker folders remains) and AC11 (a copy of the data folder holds the marker in no byte, as UTF-8, UTF-16LE or UTF-16BE). It exits 1 when a check fails and removes the scratch root and its Keychain item unless `--keep` is given.
+
+`pnpm acceptance:binary` compiles the same script into `dist/acceptance` with Bun, for a Mac that has neither Node nor Bun.
+
+## Upgrading the pin
+
+`pnpm core:build --pin <pin-file> --out <dir>` builds another pin into a staging folder of its own and never touches the app's staging. `cargo run --example headless -- --app-root <dir> --core <dir>` runs a build from such a folder on a data folder, so a database made by an older pin can be opened by the new one.
 
 ## The smoke suite
 

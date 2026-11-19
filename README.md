@@ -25,7 +25,14 @@ pnpm format:check
 pnpm lint
 pnpm typecheck
 pnpm test
+pnpm test:smoke     # black-box suite against the built sidecar; run pnpm core:build first
 ```
+
+## The smoke suite
+
+`pnpm test:smoke` builds and starts the headless runner (`cargo build --example headless`) with a scratch app root and drives the real backend through the proxy: health, sign-in, the machine API, event delivery, a foreign Host, loopback-only listeners and the at-rest column inventory (`at-rest/plain-columns.json` lists every stored column that is not sealed, each with a reason). It fails with "run pnpm core:build" when the staged core is not the pin.
+
+The header-parity test runs the Caddy image named by `ARG CADDY_IMAGE` in the pinned `apps/frontend/Dockerfile` in Docker, pulling it on first use, and compares its answers with the proxy's for a fixed request list. Without Docker it fails; set `SKIP_CADDY_PARITY=1` to skip it on purpose.
 
 ## What `core:build` produces
 

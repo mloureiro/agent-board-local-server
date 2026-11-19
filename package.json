@@ -16,6 +16,7 @@
     "lint": "eslint . && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "typecheck": "tsc -p tsconfig.json && cargo check --manifest-path src-tauri/Cargo.toml --all-targets",
     "test": "vitest --run && cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:smoke": "vitest --run --config vitest.smoke.config.ts",
     "core:build": "node scripts/build-core.ts"
   },
   "devDependencies": {

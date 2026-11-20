@@ -7,7 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::header::{HeaderValue, ALLOW, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, HOST};
+use http::header::{
+    HeaderMap, HeaderValue, ACCEPT_RANGES, ALLOW, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE,
+    CONTENT_TYPE, HOST, IF_RANGE, RANGE,
+};
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::Incoming;
@@ -20,6 +23,7 @@ use tokio::time::sleep;
 
 use super::guard::Guard;
 use super::headers::{apply_data, apply_page, ASSET_CACHE, PAGE_CACHE};
+use super::ranges::{self, Selection};
 use super::static_files::{content_type, Served, StaticFiles};
 use super::upstream::{Body, Upstream};
 
@@ -166,7 +170,7 @@ async fn handle(state: &State, peer: SocketAddr, request: Request<Incoming>) -> 
     let response = match state.guard.check(&method, request.headers()) {
         Err(refusal) => answer(refusal.status(), data),
         Ok(()) if data => forward(state, peer, request).await,
-        Ok(()) => serve_static(state, &method, &path).await,
+        Ok(()) => serve_static(state, &method, &path, request.headers()).await,
     };
     eprintln!("{method} {path} {}", response.status().as_u16());
     response
@@ -198,7 +202,12 @@ async fn forward(
 
 /// Caddy sets `Cache-Control` per route before the file server answers, so a 404 or a 405 under `/assets/` carries
 /// the asset value and every other static answer carries `no-cache`.
-async fn serve_static(state: &State, method: &Method, path: &str) -> Response<Body> {
+async fn serve_static(
+    state: &State,
+    method: &Method,
+    path: &str,
+    request_headers: &HeaderMap,
+) -> Response<Body> {
     let cache = HeaderValue::from_static(if path.starts_with("/assets/") {
         ASSET_CACHE
     } else {
@@ -221,28 +230,118 @@ async fn serve_static(state: &State, method: &Method, path: &str) -> Response<Bo
         Served::NotFound => plain(StatusCode::NOT_FOUND),
         Served::File { path, immutable } => match tokio::fs::read(&path).await {
             Err(_) => plain(StatusCode::NOT_FOUND),
-            Ok(content) => {
-                let length = content.len();
-                let body = if *method == Method::HEAD {
-                    empty()
-                } else {
-                    Full::new(Bytes::from(content))
-                        .map_err(|never| match never {})
-                        .boxed()
-                };
-                let mut response = Response::new(body);
-                let headers = response.headers_mut();
-                headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type(&path)));
-                headers.insert(
-                    CACHE_CONTROL,
-                    HeaderValue::from_static(if immutable { ASSET_CACHE } else { PAGE_CACHE }),
-                );
-                let mut response = finish(response, false);
-                response
-                    .headers_mut()
-                    .insert(CONTENT_LENGTH, HeaderValue::from(length));
-                response
-            }
+            Ok(content) => file_response(
+                method,
+                request_headers,
+                content_type(&path),
+                immutable,
+                &content,
+            ),
         },
     }
+}
+
+/// No validator is ever sent, so an `If-Range` can never match and the whole file answers it.
+fn requested_range(request_headers: &HeaderMap, size: u64) -> Selection {
+    if request_headers.contains_key(IF_RANGE) {
+        return Selection::Whole;
+    }
+    match request_headers.get(RANGE).map(HeaderValue::to_str) {
+        None => Selection::Whole,
+        Some(Ok(value)) => ranges::select(value, size),
+        Some(Err(_)) => Selection::Invalid,
+    }
+}
+
+fn sized(body: Vec<u8>, head: bool) -> (Body, usize) {
+    let length = body.len();
+    let body = if head {
+        empty()
+    } else {
+        Full::new(Bytes::from(body))
+            .map_err(|never| match never {})
+            .boxed()
+    };
+    (body, length)
+}
+
+fn file_response(
+    method: &Method,
+    request_headers: &HeaderMap,
+    content_type: &'static str,
+    immutable: bool,
+    content: &[u8],
+) -> Response<Body> {
+    let head = *method == Method::HEAD;
+    let size = content.len() as u64;
+    let selection = requested_range(request_headers, size);
+
+    if matches!(selection, Selection::Invalid | Selection::NoOverlap) {
+        let (message, content_range) = match selection {
+            Selection::NoOverlap => (
+                "invalid range: failed to overlap\n",
+                Some(format!("bytes */{size}")),
+            ),
+            _ => ("invalid range\n", None),
+        };
+        let (body, length) = sized(message.as_bytes().to_vec(), head);
+        let mut response = Response::new(body);
+        *response.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
+        let headers = response.headers_mut();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        if let Some(value) = content_range.and_then(|text| HeaderValue::from_str(&text).ok()) {
+            headers.insert(CONTENT_RANGE, value);
+        }
+        let mut response = finish(response, false);
+        response
+            .headers_mut()
+            .insert(CONTENT_LENGTH, HeaderValue::from(length));
+        return response;
+    }
+
+    let (status, content_type_value, range, bytes) = match selection {
+        Selection::Spans(spans) if spans.len() == 1 => (
+            StatusCode::PARTIAL_CONTENT,
+            HeaderValue::from_static(content_type),
+            Some(spans[0].content_range(size)),
+            ranges::slice(content, spans[0]).to_vec(),
+        ),
+        Selection::Spans(spans) => {
+            let boundary = ranges::boundary();
+            let value = format!("multipart/byteranges; boundary={boundary}");
+            (
+                StatusCode::PARTIAL_CONTENT,
+                HeaderValue::from_str(&value).expect("a boundary is hex"),
+                None,
+                ranges::multipart(&boundary, &spans, size, content_type, content),
+            )
+        }
+        _ => (
+            StatusCode::OK,
+            HeaderValue::from_static(content_type),
+            None,
+            content.to_vec(),
+        ),
+    };
+    let (body, length) = sized(bytes, head);
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    let headers = response.headers_mut();
+    headers.insert(CONTENT_TYPE, content_type_value);
+    headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    headers.insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static(if immutable { ASSET_CACHE } else { PAGE_CACHE }),
+    );
+    if let Some(value) = range.and_then(|text| HeaderValue::from_str(&text).ok()) {
+        headers.insert(CONTENT_RANGE, value);
+    }
+    let mut response = finish(response, false);
+    response
+        .headers_mut()
+        .insert(CONTENT_LENGTH, HeaderValue::from(length));
+    response
 }

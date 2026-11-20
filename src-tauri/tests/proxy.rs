@@ -385,3 +385,143 @@ async fn a_port_that_is_taken_is_reported_with_the_way_out() {
         )
     );
 }
+
+fn ranged(method: &str, path: &str, port: u16, extra: &str) -> String {
+    format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{extra}Connection: close\r\n\r\n"
+    )
+}
+
+#[tokio::test]
+async fn a_file_answers_a_byte_range_with_the_slice_and_says_where_it_sits() {
+    let fixture = Fixture::start(0).await;
+    let port = fixture.port();
+
+    let whole = send(port, &get("/assets/app.js", port)).await;
+    let first = send(
+        port,
+        &ranged("GET", "/assets/app.js", port, "Range: bytes=0-6\r\n"),
+    )
+    .await;
+    let tail = send(
+        port,
+        &ranged("GET", "/assets/app.js", port, "Range: bytes=-2\r\n"),
+    )
+    .await;
+    let page = send(port, &ranged("GET", "/", port, "Range: bytes=0-5\r\n")).await;
+
+    assert_eq!(whole.header("accept-ranges"), Some("bytes"));
+    assert_eq!((first.status, first.body.as_str()), (206, "console"));
+    assert_eq!(first.header("content-range"), Some("bytes 0-6/14"));
+    assert_eq!(first.header("content-length"), Some("7"));
+    assert_eq!(first.header("accept-ranges"), Some("bytes"));
+    assert_eq!(
+        first.header("cache-control"),
+        Some("public, max-age=31536000, immutable")
+    );
+    assert_eq!(first.header("content-type"), whole.header("content-type"));
+    assert_eq!((tail.status, tail.body.as_str()), (206, "1)"));
+    assert_eq!(tail.header("content-range"), Some("bytes 12-13/14"));
+    assert_eq!((page.status, page.body.as_str()), (206, "<html>"));
+    assert_eq!(page.header("cache-control"), Some("no-cache"));
+}
+
+#[tokio::test]
+async fn a_range_nobody_can_satisfy_is_refused_with_416_and_no_file_headers() {
+    let fixture = Fixture::start(0).await;
+    let port = fixture.port();
+
+    let beyond = send(
+        port,
+        &ranged("GET", "/assets/app.js", port, "Range: bytes=99-\r\n"),
+    )
+    .await;
+    let malformed = send(
+        port,
+        &ranged("GET", "/assets/app.js", port, "Range: bytes=abc\r\n"),
+    )
+    .await;
+
+    assert_eq!(beyond.status, 416);
+    assert_eq!(beyond.header("content-range"), Some("bytes */14"));
+    assert_eq!(beyond.body, "invalid range: failed to overlap\n");
+    assert_eq!(malformed.status, 416);
+    assert_eq!(malformed.header("content-range"), None);
+    assert_eq!(malformed.body, "invalid range\n");
+    for reply in [&beyond, &malformed] {
+        assert_eq!(
+            reply.header("content-type"),
+            Some("text/plain; charset=utf-8")
+        );
+        assert_eq!(reply.header("accept-ranges"), None);
+        assert_eq!(reply.header("cache-control"), None);
+        assert_eq!(reply.header("x-content-type-options"), Some("nosniff"));
+    }
+}
+
+#[tokio::test]
+async fn several_ranges_answer_with_a_multipart_body_that_names_its_boundary() {
+    let fixture = Fixture::start(0).await;
+    let port = fixture.port();
+
+    let reply = send(
+        port,
+        &ranged("GET", "/assets/app.js", port, "Range: bytes=0-1,4-5\r\n"),
+    )
+    .await;
+
+    let content_type = reply.header("content-type").unwrap();
+    let boundary = content_type
+        .strip_prefix("multipart/byteranges; boundary=")
+        .expect("a multipart content type");
+    assert_eq!(reply.status, 206);
+    assert_eq!(
+        reply.body,
+        format!(
+            "--{boundary}\r\nContent-Range: bytes 0-1/14\r\nContent-Type: text/javascript; charset=utf-8\r\n\r\nco\
+             \r\n--{boundary}\r\nContent-Range: bytes 4-5/14\r\nContent-Type: text/javascript; charset=utf-8\r\n\r\nol\
+             \r\n--{boundary}--\r\n"
+        )
+    );
+    assert_eq!(
+        reply.header("content-length"),
+        Some(reply.body.len().to_string().as_str())
+    );
+    assert_eq!(reply.header("content-range"), None);
+}
+
+#[tokio::test]
+async fn head_with_a_range_reports_the_slice_without_sending_it() {
+    let fixture = Fixture::start(0).await;
+    let port = fixture.port();
+
+    let reply = send(
+        port,
+        &ranged("HEAD", "/assets/app.js", port, "Range: bytes=0-6\r\n"),
+    )
+    .await;
+
+    assert_eq!((reply.status, reply.body.as_str()), (206, ""));
+    assert_eq!(reply.header("content-length"), Some("7"));
+    assert_eq!(reply.header("content-range"), Some("bytes 0-6/14"));
+}
+
+#[tokio::test]
+async fn an_if_range_validator_is_never_matched_so_the_whole_file_answers() {
+    let fixture = Fixture::start(0).await;
+    let port = fixture.port();
+
+    let reply = send(
+        port,
+        &ranged(
+            "GET",
+            "/assets/app.js",
+            port,
+            "Range: bytes=0-6\r\nIf-Range: \"anything\"\r\n",
+        ),
+    )
+    .await;
+
+    assert_eq!((reply.status, reply.body.as_str()), (200, "console.log(1)"));
+    assert_eq!(reply.header("content-range"), None);
+}

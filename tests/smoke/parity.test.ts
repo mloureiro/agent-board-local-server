@@ -15,7 +15,13 @@ interface Probe {
 interface Answer {
   status: number;
   headers: Record<string, string>;
+  length: number;
+  body: string;
+  validator: string | undefined;
 }
+
+const shape = ({ status, headers }: Answer) => ({ status, headers });
+const BOUNDARY = /boundary=([0-9a-f]+)/;
 
 const EXCLUDED_HEADERS: Record<string, string> = {
   date: 'per-response clock',
@@ -26,7 +32,6 @@ const EXCLUDED_HEADERS: Record<string, string> = {
   'content-encoding': 'Caddy compresses (encode gzip zstd); the proxy does not on loopback',
   vary: 'follows from content-encoding',
   via: 'Caddy marks a proxied answer with its own name and version; the proxy is not Caddy and adds no hop marker',
-  'accept-ranges': 'Caddy offers byte ranges on files; the proxy serves whole files and does not advertise ranges',
 };
 const IGNORED = Object.keys(EXCLUDED_HEADERS);
 
@@ -35,13 +40,26 @@ function send(port: number, probe: Probe): Promise<Answer> {
     const outgoing = httpRequest(
       { host: '127.0.0.1', port, method: probe.method, path: probe.path, headers: probe.headers, agent: false },
       (response) => {
-        response.resume();
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk: Buffer) => chunks.push(chunk));
         response.on('end', () => {
           const headers: Record<string, string> = {};
           for (const [name, value] of Object.entries(response.headers)) {
             if (!IGNORED.includes(name)) headers[name] = Array.isArray(value) ? value.join(', ') : String(value);
           }
-          resolve({ status: response.statusCode ?? 0, headers });
+          const boundary = BOUNDARY.exec(headers['content-type'] ?? '')?.[1];
+          let body = Buffer.concat(chunks).toString('latin1');
+          if (boundary !== undefined) {
+            headers['content-type'] = (headers['content-type'] ?? '').replace(boundary, 'BOUNDARY');
+            body = body.replaceAll(boundary, 'BOUNDARY');
+          }
+          resolve({
+            status: response.statusCode ?? 0,
+            headers,
+            length: Number(response.headers['content-length'] ?? -1),
+            body,
+            validator: response.headers.etag,
+          });
         });
       },
     );
@@ -103,9 +121,76 @@ describe('the proxy against the pinned Caddy', () => {
 
     for (const probe of probes) {
       const { proxy, pinned } = await both(probe);
-      expect({ probe, ...proxy }).toEqual({ probe, ...pinned });
+      expect({ probe, ...shape(proxy) }).toEqual({ probe, ...shape(pinned) });
     }
   });
+
+  it.skipIf(skipped)('serves byte ranges on files like Caddy: status, headers, length and body', async () => {
+    const probes: Probe[] = [
+      ['GET', asset(), 'bytes=0-4'],
+      ['GET', asset(), 'bytes=10-'],
+      ['GET', asset(), 'bytes=-5'],
+      ['GET', asset(), 'bytes=-0'],
+      ['GET', asset(), 'bytes=0-99999999'],
+      ['GET', asset(), 'bytes=99999999-'],
+      ['GET', asset(), 'bytes=abc'],
+      ['GET', asset(), 'bytes=5-2'],
+      ['GET', asset(), 'items=0-4'],
+      ['GET', asset(), 'bytes=0-1,4-5'],
+      ['GET', asset(), `bytes=${Array(200).fill('0-0').join(',')}`],
+      ['GET', asset(), `bytes=${Array(201).fill('0-0').join(',')}`],
+      ['GET', asset(), `bytes=${Array(200).fill('0-0').join(',')},`],
+      ['GET', asset(), `bytes=${Array(250).fill('99999999-').join(',')}`],
+      ['GET', asset(), 'bytes=-9223372036854775807'],
+      ['GET', asset(), 'bytes=-9223372036854775808'],
+      ['GET', asset(), 'bytes=0-9223372036854775807'],
+      ['GET', asset(), 'bytes=0-9223372036854775808'],
+      ['GET', asset(), 'bytes=9223372036854775807-'],
+      ['GET', asset(), 'bytes=9223372036854775808-'],
+      ['GET', asset(), 'bytes=0--0'],
+      ['GET', asset(), 'bytes=--0'],
+      ['GET', asset(), 'bytes=0-1,99999999-'],
+      ['GET', asset(), 'bytes=0-999999,4-5'],
+      ['GET', '/', 'bytes=0-4'],
+      ['GET', '/t/some-task', 'bytes=-3'],
+      ['HEAD', asset(), 'bytes=0-4'],
+      ['HEAD', asset(), 'bytes=99999999-'],
+      ['HEAD', asset(), 'bytes=0-1,4-5'],
+      ['GET', '/assets/missing.js', 'bytes=0-4'],
+      ['POST', asset(), 'bytes=0-4'],
+    ].map(([method, path, range]) => ({ method, path, headers: { range } }) as Probe);
+    probes.push(
+      { method: 'GET', path: asset() },
+      { method: 'HEAD', path: asset() },
+      { method: 'GET', path: asset(), headers: { range: 'bytes=0-4', 'if-range': '"not-the-validator"' } },
+    );
+
+    for (const probe of probes) {
+      const { proxy, pinned } = await both(probe);
+      expect({ probe, ...proxy }).toEqual({ probe, ...pinned, validator: undefined });
+    }
+  });
+
+  it.skipIf(skipped)(
+    'answers an If-Range that matches the file validator with the whole file where Caddy slices',
+    async () => {
+      const probe = { method: 'GET', path: asset() };
+      const validator = (await send((caddy as Caddy).port, probe)).validator;
+      expect(validator).toEqual(expect.any(String));
+      const ranged: Probe = { ...probe, headers: { range: 'bytes=0-4', 'if-range': validator as string } };
+
+      const { proxy, pinned } = await both(ranged);
+
+      expect({ status: pinned.status, range: pinned.headers['content-range'] }).toEqual({
+        status: 206,
+        range: expect.stringMatching(/^bytes 0-4\//),
+      });
+      expect({ status: proxy.status, range: proxy.headers['content-range'] }).toEqual({
+        status: 200,
+        range: undefined,
+      });
+    },
+  );
 
   it.skipIf(skipped)('differs from Caddy only where the proxy deliberately refuses or the guard applies', async () => {
     const expected: { name: string; probe: Probe; proxy: number; caddy: number }[] = [
@@ -176,7 +261,7 @@ describe('the proxy against the pinned Caddy', () => {
     ]) {
       const { proxy, pinned } = await both(probe);
       expect(pinned.status).toBe(502);
-      expect({ probe, ...proxy }).toEqual({ probe, ...pinned });
+      expect({ probe, ...shape(proxy) }).toEqual({ probe, ...shape(pinned) });
     }
   });
 });

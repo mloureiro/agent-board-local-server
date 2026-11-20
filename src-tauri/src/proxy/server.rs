@@ -235,7 +235,7 @@ async fn serve_static(
                 request_headers,
                 content_type(&path),
                 immutable,
-                &content,
+                content,
             ),
         },
     }
@@ -270,7 +270,7 @@ fn file_response(
     request_headers: &HeaderMap,
     content_type: &'static str,
     immutable: bool,
-    content: &[u8],
+    content: Vec<u8>,
 ) -> Response<Body> {
     let head = *method == Method::HEAD;
     let size = content.len() as u64;
@@ -307,7 +307,7 @@ fn file_response(
             StatusCode::PARTIAL_CONTENT,
             HeaderValue::from_static(content_type),
             Some(spans[0].content_range(size)),
-            ranges::slice(content, spans[0]).to_vec(),
+            ranges::slice(&content, spans[0]).to_vec(),
         ),
         Selection::Spans(spans) => {
             let boundary = ranges::boundary();
@@ -316,14 +316,14 @@ fn file_response(
                 StatusCode::PARTIAL_CONTENT,
                 HeaderValue::from_str(&value).expect("a boundary is hex"),
                 None,
-                ranges::multipart(&boundary, &spans, size, content_type, content),
+                ranges::multipart(&boundary, &spans, size, content_type, &content),
             )
         }
         _ => (
             StatusCode::OK,
             HeaderValue::from_static(content_type),
             None,
-            content.to_vec(),
+            content,
         ),
     };
     let (body, length) = sized(bytes, head);

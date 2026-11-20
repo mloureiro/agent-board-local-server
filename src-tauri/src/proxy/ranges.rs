@@ -2,6 +2,7 @@ use std::fmt::Write;
 
 const UNIT: &str = "bytes=";
 const BLANK: [char; 4] = [' ', '\t', '\r', '\n'];
+const MAX_ITEMS: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
@@ -29,8 +30,9 @@ pub enum Selection {
 }
 
 /// Follows Go's `net/http` `parseRange`, which the pinned Caddy serves files with: an unparsable header is an
-/// error, a start past the end of the file only counts when no other range survives, and a list whose ranges
-/// add up to more than the file is answered with the whole file.
+/// error, a start past the end of the file only counts when no other range survives, a list whose ranges add up
+/// to more than the file is answered with the whole file, and so is a list of more than 200 comma-separated items,
+/// counted before any of them is read. Numbers are signed 64-bit there, so one above `i64::MAX` is unparsable.
 pub fn select(header: &str, size: u64) -> Selection {
     if header.is_empty() {
         return Selection::Whole;
@@ -38,6 +40,9 @@ pub fn select(header: &str, size: u64) -> Selection {
     let Some(list) = header.strip_prefix(UNIT) else {
         return Selection::Invalid;
     };
+    if list.split(',').count() > MAX_ITEMS {
+        return Selection::Whole;
+    }
     let mut spans = Vec::new();
     let mut beyond_the_end = false;
     for item in list.split(',') {
@@ -50,7 +55,12 @@ pub fn select(header: &str, size: u64) -> Selection {
         };
         let (first, last) = (first.trim_matches(BLANK), last.trim_matches(BLANK));
         if first.is_empty() {
-            let Ok(tail) = last.parse::<u64>() else {
+            let Some(tail) = last
+                .parse::<i64>()
+                .ok()
+                .filter(|_| !last.starts_with('-'))
+                .map(i64::unsigned_abs)
+            else {
                 return Selection::Invalid;
             };
             if size == 0 {
@@ -64,7 +74,7 @@ pub fn select(header: &str, size: u64) -> Selection {
             });
             continue;
         }
-        let Ok(start) = first.parse::<u64>() else {
+        let Ok(start) = first.parse::<i64>().map(i64::unsigned_abs) else {
             return Selection::Invalid;
         };
         if start >= size {
@@ -74,13 +84,13 @@ pub fn select(header: &str, size: u64) -> Selection {
         let length = if last.is_empty() {
             size - start
         } else {
-            let Ok(end) = last.parse::<u64>() else {
+            let Ok(end) = last.parse::<i64>() else {
                 return Selection::Invalid;
             };
-            if start > end {
+            if i64::try_from(start).is_ok_and(|start| start > end) {
                 return Selection::Invalid;
             }
-            end.min(size - 1) - start + 1
+            end.unsigned_abs().min(size - 1) - start + 1
         };
         spans.push(Span { start, length });
     }
@@ -180,10 +190,36 @@ mod tests {
             ("items=0-1", 10, Selection::Invalid),
             ("Bytes=0-1", 10, Selection::Invalid),
             ("bytes=99999999999999999999-", 10, Selection::Invalid),
+            ("bytes=9223372036854775807-", 10, Selection::NoOverlap),
+            ("bytes=9223372036854775808-", 10, Selection::Invalid),
+            ("bytes=9223372036854775808-5", 10, Selection::Invalid),
+            ("bytes=0-9223372036854775807", 10, spans(&[(0, 10)])),
+            ("bytes=0-9223372036854775808", 10, Selection::Invalid),
+            ("bytes=-9223372036854775807", 10, spans(&[(0, 10)])),
+            ("bytes=-9223372036854775808", 10, Selection::Invalid),
+            ("bytes=0--0", 10, spans(&[(0, 1)])),
+            ("bytes=5--0", 10, Selection::Invalid),
+            ("bytes=--0", 10, Selection::Invalid),
         ];
         for (header, size, expected) in cases {
             assert_eq!(&select(header, *size), expected, "{header:?} on {size}");
         }
+    }
+
+    #[test]
+    fn more_than_200_items_select_the_whole_file_before_any_is_read() {
+        let list =
+            |count: usize, tail: &str| format!("bytes={}{tail}", vec!["0-0"; count].join(","));
+        assert!(
+            matches!(select(&list(200, ""), 1000), Selection::Spans(found) if found.len() == 200)
+        );
+        assert_eq!(select(&list(201, ""), 1000), Selection::Whole);
+        assert_eq!(select(&list(200, ","), 1000), Selection::Whole);
+        assert_eq!(select(&list(201, ",x"), 1000), Selection::Whole);
+        assert_eq!(
+            select(&format!("bytes={}", vec!["5000-"; 250].join(",")), 1000),
+            Selection::Whole
+        );
     }
 
     #[test]

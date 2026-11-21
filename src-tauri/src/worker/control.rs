@@ -7,7 +7,6 @@ use tokio::sync::Mutex;
 use super::credentials::{discard_pending, enrolled, pending_present};
 use super::enrol::{enrol, BoardInit, EnrolError, InitReport, InitRunner};
 use super::layout;
-use super::machine;
 use super::processes::{Processes, WorkerSetup, WORKER_LISTEN};
 use super::shutdown::{kill_stragglers, pause_runs};
 use crate::runtime::PROXY;
@@ -102,15 +101,6 @@ impl WorkerControl {
     ) -> Result<(), String> {
         layout::ensure(&self.host.setup.paths, bundled_board, app_executable)
             .map_err(|error| error.to_string())?;
-        machine::recover(
-            &self
-                .host
-                .setup
-                .paths
-                .worker_config_dir()
-                .join("config.json"),
-        )
-        .map_err(|error| error.to_string())?;
         discard_pending(self.secrets.as_ref()).map_err(|error| error.to_string())
     }
 }

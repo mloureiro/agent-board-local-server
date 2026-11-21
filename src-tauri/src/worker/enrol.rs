@@ -87,27 +87,10 @@ impl BoardInit {
 
 impl InitRunner for BoardInit {
     async fn run_init(&self, url: &str) -> Result<InitReport, String> {
-        let held = match self.config_path() {
-            Some(path) => Some(machine::hold(&path).map_err(|error| {
-                format!("the worker's config.json could not be set aside: {error}")
-            })?),
-            None => None,
-        };
-        let outcome = self.run_board_init(url).await;
-        match (outcome, held) {
-            (Ok(()), Some(held)) => held
-                .keep_with_board_name()
-                .map(|machine| InitReport { machine })
-                .map_err(|error| format!("the worker's config.json could not be updated: {error}")),
-            (Ok(()), None) => Ok(InitReport::default()),
-            (Err(message), Some(held)) => Err(match held.restore() {
-                Ok(()) => message,
-                Err(error) => {
-                    format!("{message}; the worker's config.json could not be put back ({error})")
-                }
-            }),
-            (Err(message), None) => Err(message),
-        }
+        self.run_board_init(url).await?;
+        Ok(InitReport {
+            machine: self.config_path().and_then(|path| machine::read(&path)),
+        })
     }
 }
 

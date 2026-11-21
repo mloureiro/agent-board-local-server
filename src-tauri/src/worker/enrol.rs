@@ -38,10 +38,8 @@ impl EnrolError {
     }
 }
 
-/// What an accepted enrolment leaves behind.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InitReport {
-    /// The machine name in the worker's config.json, which is the one the board gave the token.
     pub machine: Option<String>,
 }
 

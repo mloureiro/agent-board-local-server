@@ -37,7 +37,6 @@ pub fn manage(app: &AppHandle, running: Running) {
     });
 }
 
-/// A second click on "Connect worker…" brings the open window forward instead of opening another.
 pub fn open(app: &AppHandle) {
     if let Some(existing) = app.get_webview_window(LABEL) {
         let _ = existing.unminimize();
@@ -71,7 +70,6 @@ fn keep_open_while_connecting(window: &WebviewWindow, session: Arc<Session<Runni
     });
 }
 
-/// For Quit and for the system ending the app: the check that waits on the board is dropped and the window goes.
 pub fn close(app: &AppHandle) {
     if let Some(state) = app.try_state::<EnrolWindow>() {
         if let Some(task) = state.task.lock().expect("enrol task lock").take() {
@@ -95,7 +93,6 @@ pub async fn enrol_submit(
     task.await.map_err(|_| "the app is quitting".to_owned())
 }
 
-/// Refused while the board is being asked.
 #[tauri::command]
 pub fn enrol_cancel(app: AppHandle, state: State<'_, EnrolWindow>) -> bool {
     if !state.session.can_close() {

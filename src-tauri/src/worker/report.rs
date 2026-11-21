@@ -29,8 +29,7 @@ fn read_tail(path: &Path) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// A failed `internal dispatch` ends with the CLI's own message, `agent-board: <reason>`; any other last line is
-/// better than none.
+/// A failed `internal dispatch` ends with the CLI's own message, `agent-board: <reason>`.
 fn failure_reason(log: &str) -> Option<String> {
     let lines = || log.lines().map(str::trim).filter(|line| !line.is_empty());
     let line = lines()
@@ -52,8 +51,6 @@ fn is_refusal(reason: &str) -> bool {
         .any(|word| REFUSAL_WORDS.contains(&word))
 }
 
-/// What the menu's worker line says after a dispatch tick; `None` leaves the line as it is, because a tick that
-/// found the lock held or was killed told nothing about the board.
 pub fn worker_note(result: &TickResult, log: &Path) -> Option<String> {
     match result {
         TickResult::Ok => Some("ok".into()),

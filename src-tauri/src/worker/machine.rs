@@ -8,7 +8,6 @@ pub fn read(config: &Path) -> Option<String> {
     json.get("machine")?.as_str().map(str::to_owned)
 }
 
-/// Replaces the machine name and leaves the lanes and repositories in the file as they are.
 pub fn set(config: &Path, machine: &str) -> io::Result<()> {
     let mut json: serde_json::Value = serde_json::from_slice(&fs::read(config)?)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -35,11 +34,8 @@ fn backup_of(config: &Path) -> PathBuf {
     PathBuf::from(backup)
 }
 
-/// The kept config.json of a worker that is being enrolled again.
-///
-/// `board init` keeps an existing config.json and then asks the board nothing, so a token issued to another machine
-/// name would claim under the old name and be refused. Setting the file aside makes init write a fresh one, which it
-/// does only after the board has accepted the token and the data key, and with the name the board gives.
+/// `board init` skips its check of the board when config.json already exists, so a token issued to another machine
+/// name would be accepted and then refused on every claim; with the file set aside init checks first and names the machine.
 pub struct Held {
     config: PathBuf,
     backup: Option<PathBuf>,
@@ -63,7 +59,6 @@ pub fn hold(config: &Path) -> io::Result<Held> {
 }
 
 impl Held {
-    /// The enrolment failed: the file the owner had comes back as it was.
     pub fn restore(self) -> io::Result<()> {
         match self.backup {
             Some(backup) => fs::rename(backup, &self.config),
@@ -71,7 +66,6 @@ impl Held {
         }
     }
 
-    /// The enrolment worked: the owner's file comes back with the board's machine name, and that name is returned.
     pub fn keep_with_board_name(self) -> io::Result<Option<String>> {
         let named = read(&self.config);
         match (self.backup, &named) {
@@ -86,7 +80,6 @@ impl Held {
     }
 }
 
-/// A file set aside by an enrolment that never finished (the app quit mid-way) goes back.
 pub fn recover(config: &Path) -> io::Result<()> {
     let backup = backup_of(config);
     if backup.exists() && fs::symlink_metadata(config).is_err() {

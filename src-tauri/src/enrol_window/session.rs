@@ -14,7 +14,6 @@ pub trait Enroller: Send + Sync {
     ) -> impl Future<Output = Result<Enrolled, EnrolError>> + Send;
 }
 
-/// What the window shows; it reaches the page as JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "phase", rename_all = "camelCase")]
 pub enum Phase {
@@ -46,7 +45,6 @@ impl<E: Enroller> Session<E> {
         phase
     }
 
-    /// A second submit while one is running, or after a success, changes nothing.
     pub async fn submit(&self, token: &str, data_key: &str) -> Phase {
         {
             let mut phase = self.phase.lock().expect("phase lock");
@@ -70,7 +68,6 @@ impl<E: Enroller> Session<E> {
         }
     }
 
-    /// Closing is refused while the board is being asked: stopping then would leave the worker half enrolled.
     pub fn can_close(&self) -> bool {
         self.phase() != Phase::Connecting
     }

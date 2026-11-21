@@ -25,10 +25,8 @@ struct State {
     stopping: bool,
 }
 
-/// What a successful enrolment tells the owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Enrolled {
-    /// The name the board knows this machine by, read from config.json.
     pub machine: Option<String>,
 }
 

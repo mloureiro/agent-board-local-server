@@ -1,6 +1,6 @@
 {
   "repository": "mloureiro/agent-board",
-  "commit": "3807c443d691a47e0c2a57bdf7cc95e6e6a07c51",
+  "commit": "a62d3eda34979b4b8a064f9f24cf9b0c9cd0309e",
   "branch": "local-server",
   "includes": [
     {
@@ -26,7 +26,11 @@
     {
       "branch": "feat/agent-board-local-server-6h4/machine-whoami",
       "commit": "fa26c0ee739cd697aeff75e4d5c1e2a73d6e67e1"
+    },
+    {
+      "branch": "feat/agent-board-local-server-6h4/init-force-verify",
+      "commit": "2ae8fda1c3123867ba969c0ccd0a59eb2680dd9f"
     }
   ],
-  "reason": "The fork's local-server branch is upstream 79255ce plus changes a single-machine server needs and upstream does not have yet: listen-host reads the listen address from HOST so the backend can bind to loopback; pglite-driver runs the backend on an in-process PGlite for a pglite:// database URL, with PGLITE_ASSETS_DIR and PGLITE_SHARED_BUFFERS; credentials-command lets the CLI take its token and data key from a command named by AGENT_BOARD_CREDENTIALS_COMMAND; worker-shutdown adds board internal shutdown, which ends a worker and its runs within a grace period; shutdown-idle-agent makes that shutdown kill an agent that stays alive after its turn ended; machine-whoami makes the version machine command name the machine a token belongs to, and makes board init take that name, check the token and the data key with the board before writing anything, and keep --machine only as a check."
+  "reason": "The fork's local-server branch is upstream 79255ce plus changes a single-machine server needs and upstream does not have yet: listen-host reads the listen address from HOST so the backend can bind to loopback; pglite-driver runs the backend on an in-process PGlite for a pglite:// database URL, with PGLITE_ASSETS_DIR and PGLITE_SHARED_BUFFERS; credentials-command lets the CLI take its token and data key from a command named by AGENT_BOARD_CREDENTIALS_COMMAND; worker-shutdown adds board internal shutdown, which ends a worker and its runs within a grace period; shutdown-idle-agent makes that shutdown kill an agent that stays alive after its turn ended; machine-whoami makes the version machine command name the machine a token belongs to, and makes board init take that name, check the token and the data key with the board before writing anything, and keep --machine only as a check; init-force-verify makes board init --force check the token and the data key with the board whenever a URL and credentials are known, credentials-command mode included, and rewrite only the machine name of a kept config.json when the board names another."
 }

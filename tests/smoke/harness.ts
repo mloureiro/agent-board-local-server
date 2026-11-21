@@ -86,6 +86,10 @@ function alive(pid: number): boolean {
 }
 
 export interface Runner {
+  /** Writes one line to the runner's stdin; the headless runner reads the machine token and the data key from it. */
+  writeLine: (line: string) => void;
+  /** Resolves with the first match in what the runner printed so far or prints next; fails after the timeout. */
+  waitFor: (pattern: RegExp, timeoutMs: number) => Promise<RegExpMatchArray>;
   appRoot: string;
   proxyPort: number;
   backendPort: number | null;
@@ -111,14 +115,18 @@ export function scratchDir(prefix: string): string {
   return dir;
 }
 
-export async function startRunner(options: { appRoot?: string; upstreamPort?: number } = {}): Promise<Runner> {
+export async function startRunner(
+  options: { appRoot?: string; upstreamPort?: number; enrolFromStdin?: boolean } = {},
+): Promise<Runner> {
   buildRunner();
   const appRoot = options.appRoot ?? scratchDir('abls-smoke-');
   const port = await freePort();
   const args = ['--app-root', appRoot, '--port', String(port)];
   if (options.upstreamPort !== undefined) args.push('--upstream', `http://127.0.0.1:${options.upstreamPort}`);
 
-  const child = spawn(runnerBinary, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  if (options.enrolFromStdin === true) args.push('--enrol-from-stdin');
+  const child = spawn(runnerBinary, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  if (options.enrolFromStdin !== true) child.stdin.end();
   running.add(child);
   let output = '';
   const exited = new Promise<number | null>((done) => child.once('exit', (code) => done(code)));
@@ -155,6 +163,10 @@ export async function startRunner(options: { appRoot?: string; upstreamPort?: nu
   const userName = typeof settings['userName'] === 'string' ? settings['userName'] : '';
 
   return {
+    writeLine: (line) => {
+      child.stdin.write(`${line}\n`);
+    },
+    waitFor: wait,
     appRoot,
     proxyPort: port,
     backendPort,

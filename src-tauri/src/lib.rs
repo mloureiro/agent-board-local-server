@@ -1,5 +1,6 @@
 mod app;
 pub mod backend;
+pub mod enrol_window;
 pub mod lock;
 pub mod paths;
 pub mod proxy;

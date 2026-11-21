@@ -4,13 +4,14 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, RunEvent};
 use tokio::sync::Mutex;
 
+use crate::enrol_window;
 use crate::lock::{self, LockError};
 use crate::paths::{AppPaths, Resources, Sidecars};
 use crate::runtime::{self, Config, Running, WorkerConfig};
 use crate::secrets::Keychain;
 use crate::settings::Settings;
 use crate::supervisor::StatusBoard;
-use crate::tray::{abort_dialogs, handle_click, TrayMenu, QUIT};
+use crate::tray::{handle_click, TrayMenu, QUIT};
 
 fn login_name() -> String {
     std::env::var("USER").unwrap_or_else(|_| "user".into())
@@ -18,6 +19,10 @@ fn login_name() -> String {
 
 pub fn run() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            enrol_window::window::enrol_submit,
+            enrol_window::window::enrol_cancel
+        ])
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -51,8 +56,9 @@ pub fn run() {
                 .expect("nobody else holds the lock yet");
             app.manage(running.clone());
 
+            enrol_window::manage(app.handle(), running.clone());
+
             let clicked_board = board.clone();
-            let clicked_running = running.clone();
             TrayIconBuilder::new()
                 .icon(tauri::include_image!("icons/tray.png"))
                 .icon_as_template(true)
@@ -62,7 +68,7 @@ pub fn run() {
                     if event.id().as_ref() == QUIT {
                         quit_app(app);
                     } else {
-                        handle_click(event.id().as_ref(), &clicked_board, &clicked_running);
+                        handle_click(app, event.id().as_ref(), &clicked_board);
                     }
                 })
                 .build(app)?;
@@ -132,7 +138,7 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("the app could not start")
         .run(|app, event| match event {
-            // Tauri asks to exit when no window is left, and this app never has one; only Quit carries a code.
+            // Tauri asks to exit when the last window closes, and the app lives in the tray; only Quit carries a code.
             RunEvent::ExitRequested {
                 api, code: None, ..
             } => api.prevent_exit(),
@@ -144,7 +150,7 @@ pub fn run() {
 /// The system can end the app without a Quit click (log out, restart, a terminate request); the processes it
 /// started must not outlive it, so whatever Quit has not already stopped is stopped here.
 fn stop_before_exit(app: &AppHandle) {
-    abort_dialogs();
+    enrol_window::close(app);
     let Some(running) = app.try_state::<Running>() else {
         return;
     };
@@ -159,7 +165,7 @@ fn stop_before_exit(app: &AppHandle) {
 fn quit_app(app: &AppHandle) {
     let running = app.state::<Running>().inner().clone();
     let app = app.clone();
-    abort_dialogs();
+    enrol_window::close(&app);
     tauri::async_runtime::spawn(async move {
         if let Some(handle) = running.lock().await.take() {
             handle.stop().await;

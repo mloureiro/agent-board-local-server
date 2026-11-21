@@ -18,7 +18,8 @@ use crate::supervisor::process::{
     describe_exit, rotate_if_larger, stop_requested, with_log_tail, LOG_LIMIT,
 };
 use crate::supervisor::{decide, Decision, ProcessSpec, RunningProcess, Status, StatusBoard};
-use crate::worker::enrol::{host_name, EnrolError};
+use crate::worker::control::Enrolled;
+use crate::worker::enrol::EnrolError;
 use crate::worker::processes::{WorkerSetup, WORKER_LISTEN};
 use crate::worker::{env as worker_env, WorkerControl};
 
@@ -81,7 +82,7 @@ impl Handle {
         self.worker.clone()
     }
 
-    pub async fn enrol(&self, token: &str, data_key: &str) -> Result<(), EnrolError> {
+    pub async fn enrol(&self, token: &str, data_key: &str) -> Result<Enrolled, EnrolError> {
         match &self.worker {
             Some(worker) => worker.enrol(token, data_key).await,
             None => Err(EnrolError::new("this run has no worker")),
@@ -192,7 +193,6 @@ fn prepare_worker(
         setup,
         worker.secrets.clone(),
         board.clone(),
-        host_name(),
     ));
     match control.prepare(&config.sidecars.board, &worker.app_executable) {
         Ok(()) => Some(control),

@@ -5,4 +5,8 @@ export default tseslint.config(
   { ignores: ['node_modules/', 'src-tauri/', 'dist/', '.claude/', 'wiki/'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
+  {
+    files: ['ui/**/*.js'],
+    languageOptions: { globals: { window: 'readonly', document: 'readonly' } },
+  },
 );

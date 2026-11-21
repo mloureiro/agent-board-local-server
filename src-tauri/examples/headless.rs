@@ -10,7 +10,7 @@ use agent_board_local_server::runtime::{self, Config, WorkerConfig, BACKEND, PRO
 use agent_board_local_server::secrets::{Keychain, MemoryStore, SecretStore};
 use agent_board_local_server::supervisor::{Status, StatusBoard};
 use agent_board_local_server::worker::credentials::run_helper_if_requested;
-use agent_board_local_server::worker::processes::{DISPATCH, WORKER_LISTEN, WORKER_WATCH};
+use agent_board_local_server::worker::processes::{DISPATCH, WORKER, WORKER_LISTEN, WORKER_WATCH};
 use tokio::signal::unix::{signal, SignalKind};
 
 const PACKAGING: &str = env!("CARGO_MANIFEST_DIR");
@@ -152,6 +152,7 @@ async fn main() {
             for (name, title) in [
                 (BACKEND, "backend"),
                 (PROXY, "proxy"),
+                (WORKER, "worker"),
                 (WORKER_LISTEN, "worker listener"),
                 (WORKER_WATCH, "worker watch"),
                 (DISPATCH, "last dispatch tick"),
@@ -234,18 +235,18 @@ async fn enrol_from_stdin(
     .await;
     ready.map_err(|_| "the proxy did not start".to_owned())?;
     let (token, data_key) = read.await.map_err(|error| error.to_string())??;
-    handle
+    let done = handle
         .enrol(&token, &data_key)
         .await
         .map_err(|error| error.to_string())?;
-    println!("worker enrolled");
+    println!("worker enrolled as {}", done.machine.unwrap_or_default());
     loop {
         let next = tokio::task::spawn_blocking(read_credentials_from_stdin).await;
         let Ok(Ok((token, data_key))) = next else {
             return Ok(true);
         };
         match handle.enrol(&token, &data_key).await {
-            Ok(()) => println!("worker re-enrolled"),
+            Ok(done) => println!("worker re-enrolled as {}", done.machine.unwrap_or_default()),
             Err(error) => println!("worker re-enrolment failed: {error}"),
         }
     }

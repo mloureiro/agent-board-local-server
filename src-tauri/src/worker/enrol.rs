@@ -9,6 +9,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use super::credentials::{discard_pending, promote_pending, write_pending, Credentials};
+use super::machine;
 use crate::secrets::{SecretError, SecretStore};
 
 const INIT_LIMIT: Duration = Duration::from_secs(60);
@@ -37,9 +38,15 @@ impl EnrolError {
     }
 }
 
+/// What an accepted enrolment leaves behind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InitReport {
+    /// The machine name in the worker's config.json, which is the one the board gave the token.
+    pub machine: Option<String>,
+}
+
 pub trait InitRunner: Send + Sync {
-    fn run_init(&self, url: &str, machine: &str)
-        -> impl Future<Output = Result<(), String>> + Send;
+    fn run_init(&self, url: &str) -> impl Future<Output = Result<InitReport, String>> + Send;
 }
 
 pub struct BoardInit {
@@ -47,10 +54,16 @@ pub struct BoardInit {
     pub env: BTreeMap<String, String>,
 }
 
-impl InitRunner for BoardInit {
-    async fn run_init(&self, url: &str, machine: &str) -> Result<(), String> {
+impl BoardInit {
+    fn config_path(&self) -> Option<PathBuf> {
+        self.env
+            .get("AGENT_BOARD_CONFIG_DIR")
+            .map(|dir| PathBuf::from(dir).join("config.json"))
+    }
+
+    async fn run_board_init(&self, url: &str) -> Result<(), String> {
         let run = Command::new(&self.board)
-            .args(["init", "--url", url, "--machine", machine, "--force"])
+            .args(["init", "--url", url, "--force"])
             .env_clear()
             .envs(&self.env)
             .stdin(Stdio::null())
@@ -74,11 +87,38 @@ impl InitRunner for BoardInit {
     }
 }
 
+impl InitRunner for BoardInit {
+    async fn run_init(&self, url: &str) -> Result<InitReport, String> {
+        let held = match self.config_path() {
+            Some(path) => Some(machine::hold(&path).map_err(|error| {
+                format!("the worker's config.json could not be set aside: {error}")
+            })?),
+            None => None,
+        };
+        let outcome = self.run_board_init(url).await;
+        match (outcome, held) {
+            (Ok(()), Some(held)) => held
+                .keep_with_board_name()
+                .map(|machine| InitReport { machine })
+                .map_err(|error| format!("the worker's config.json could not be updated: {error}")),
+            (Ok(()), None) => Ok(InitReport::default()),
+            (Err(message), Some(held)) => Err(match held.restore() {
+                Ok(()) => message,
+                Err(error) => {
+                    format!("{message}; the worker's config.json could not be put back ({error})")
+                }
+            }),
+            (Err(message), None) => Err(message),
+        }
+    }
+}
+
 /// `board init` ends with its own health check: a refused token shows up as a failed line (✗) with a hint,
-/// far from the top of a long report. Errors of its own (bad arguments) come on stderr.
+/// far from the top of a long report. Errors of its own (a refused token, a data key the board does not hold, an
+/// unreachable board, bad arguments) come on stderr, the first line being the message and the rest its usage text.
 fn failure_message(stdout: &str, stderr: &str) -> Option<String> {
-    if !stderr.trim().is_empty() {
-        return Some(stderr.trim().to_owned());
+    if let Some(first) = stderr.lines().find(|line| !line.trim().is_empty()) {
+        return Some(first.trim().trim_start_matches("board:").trim().to_owned());
     }
     let mut parts = Vec::new();
     let mut lines = stdout.lines().peekable();
@@ -88,9 +128,12 @@ fn failure_message(stdout: &str, stderr: &str) -> Option<String> {
         }
         let mut part = line.trim().trim_start_matches('✗').trim().to_owned();
         if let Some(hint) = lines.next_if(|next| next.trim_start().starts_with('→')) {
-            part.push_str(" (");
-            part.push_str(hint.trim().trim_start_matches('→').trim());
-            part.push(')');
+            let hint = hint.trim().trim_start_matches('→').trim();
+            if !hint.contains("board init") {
+                part.push_str(" (");
+                part.push_str(hint);
+                part.push(')');
+            }
         }
         parts.push(part);
     }
@@ -112,7 +155,7 @@ fn is_single_line(value: &str) -> bool {
     !value.is_empty() && !value.chars().any(char::is_control)
 }
 
-fn scrub(message: &str, secrets: &[&str]) -> String {
+pub(crate) fn scrub(message: &str, secrets: &[&str]) -> String {
     let mut text = message.to_owned();
     for secret in secrets.iter().filter(|secret| !secret.is_empty()) {
         text = text.replace(secret, "(withheld)");
@@ -143,49 +186,13 @@ fn looks_like_secret(word: &str) -> bool {
     })
 }
 
-pub fn machine_name(host: &str) -> String {
-    let first = host.split('.').next().unwrap_or("");
-    let cleaned: String = first
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .take(64)
-        .collect();
-    let trimmed = cleaned.trim_start_matches(['_', '-']);
-    if trimmed.is_empty() {
-        "machine".into()
-    } else {
-        trimmed.to_owned()
-    }
-}
-
-pub fn host_name() -> String {
-    let mut buffer = [0u8; 256];
-    // SAFETY: gethostname writes at most `buffer.len()` bytes into a buffer we own.
-    let status = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
-    if status != 0 {
-        return "machine".into();
-    }
-    let end = buffer
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(buffer.len());
-    machine_name(&String::from_utf8_lossy(&buffer[..end]))
-}
-
 pub async fn enrol<R: InitRunner>(
     store: &dyn SecretStore,
     runner: &R,
     url: &str,
-    machine: &str,
     token: &str,
     data_key: &str,
-) -> Result<(), EnrolError> {
+) -> Result<InitReport, EnrolError> {
     let credentials = Credentials {
         token: bare_value(token, "AGENT_BOARD_TOKEN"),
         data_key: bare_value(data_key, "AGENT_BOARD_DATA_KEY"),
@@ -198,9 +205,9 @@ pub async fn enrol<R: InitRunner>(
 
     discard_pending(store)?;
     write_pending(store, &credentials)?;
-    match runner.run_init(url, machine).await {
-        Ok(()) => match promote_pending(store) {
-            Ok(()) => Ok(()),
+    match runner.run_init(url).await {
+        Ok(report) => match promote_pending(store) {
+            Ok(()) => Ok(report),
             Err(error) => Err(with_cleanup(EnrolError::from(error), store)),
         },
         Err(message) => Err(with_cleanup(
@@ -233,19 +240,19 @@ mod tests {
     use super::*;
 
     struct FakeInit {
-        outcome: Result<(), String>,
+        outcome: Result<InitReport, String>,
         seen_by_helper: Mutex<Option<String>>,
         store: std::sync::Arc<MemoryStore>,
     }
 
     impl InitRunner for FakeInit {
-        async fn run_init(&self, _url: &str, _machine: &str) -> Result<(), String> {
+        async fn run_init(&self, _url: &str) -> Result<InitReport, String> {
             *self.seen_by_helper.lock().unwrap() = helper_output(self.store.as_ref()).ok();
             self.outcome.clone()
         }
     }
 
-    fn fake(outcome: Result<(), String>, store: &std::sync::Arc<MemoryStore>) -> FakeInit {
+    fn fake(outcome: Result<InitReport, String>, store: &std::sync::Arc<MemoryStore>) -> FakeInit {
         FakeInit {
             outcome,
             seen_by_helper: Mutex::new(None),
@@ -269,7 +276,6 @@ mod tests {
             store.as_ref(),
             &runner,
             "http://127.0.0.1:4785",
-            "mac",
             "AGENT_BOARD_TOKEN=abm_pasted-wrong",
             "abk1_new",
         )
@@ -293,7 +299,7 @@ mod tests {
     struct ArmsTheStore(std::sync::Arc<DeletesFailWhenArmed>);
 
     impl InitRunner for ArmsTheStore {
-        async fn run_init(&self, _url: &str, _machine: &str) -> Result<(), String> {
+        async fn run_init(&self, _url: &str) -> Result<InitReport, String> {
             self.0.arm();
             Err("refused".into())
         }
@@ -307,7 +313,6 @@ mod tests {
             store.as_ref(),
             &ArmsTheStore(store.clone()),
             "http://127.0.0.1:4785",
-            "mac",
             "abm_new",
             "abk1_new",
         )
@@ -322,13 +327,12 @@ mod tests {
     #[tokio::test]
     async fn an_accepted_init_promotes_the_credentials_without_the_pasted_name_prefix() {
         let store = std::sync::Arc::new(MemoryStore::default());
-        let runner = fake(Ok(()), &store);
+        let runner = fake(Ok(InitReport::default()), &store);
 
         enrol(
             store.as_ref(),
             &runner,
             "http://127.0.0.1:4785",
-            "mac",
             " AGENT_BOARD_TOKEN=abm_fresh \n",
             "AGENT_BOARD_DATA_KEY=abk1_fresh",
         )
@@ -348,13 +352,12 @@ mod tests {
     #[tokio::test]
     async fn a_value_with_a_line_break_is_refused_before_anything_is_stored() {
         let store = std::sync::Arc::new(MemoryStore::default());
-        let runner = fake(Ok(()), &store);
+        let runner = fake(Ok(InitReport::default()), &store);
 
         let error = enrol(
             store.as_ref(),
             &runner,
             "http://127.0.0.1:4785",
-            "mac",
             "abm_x\nAGENT_BOARD_DATA_KEY=abk1_injected",
             "abk1_real",
         )
@@ -378,18 +381,21 @@ mod tests {
             Some("server: the token was refused (401) (create a new token on the board's Settings page)")
         );
         assert_eq!(
-            failure_message(report, "--url is needed\n").as_deref(),
+            failure_message(
+                report,
+                "board: --url is needed\nUsage: board init [options]\n"
+            )
+            .as_deref(),
             Some("--url is needed")
         );
         assert_eq!(failure_message("✓ all fine\n", ""), None);
-    }
-
-    #[test]
-    fn a_host_name_becomes_a_machine_name_the_board_accepts() {
-        assert_eq!(machine_name("mac.lan"), "mac");
-        assert_eq!(machine_name("Marcos's MacBook"), "Marcos-s-MacBook");
-        assert_eq!(machine_name("-odd"), "odd");
-        assert_eq!(machine_name(""), "machine");
-        assert_eq!(machine_name(&"a".repeat(80)).len(), 64);
+        assert_eq!(
+            failure_message(
+                "✗ server: refused the token\n    → run \"board init --force\" again\n",
+                ""
+            )
+            .as_deref(),
+            Some("server: refused the token")
+        );
     }
 }

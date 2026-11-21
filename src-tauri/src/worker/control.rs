@@ -5,8 +5,9 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 use super::credentials::{discard_pending, enrolled, pending_present};
-use super::enrol::{enrol, BoardInit, EnrolError, InitRunner};
+use super::enrol::{enrol, BoardInit, EnrolError, InitReport, InitRunner};
 use super::layout;
+use super::machine;
 use super::processes::{Processes, WorkerSetup, WORKER_LISTEN};
 use super::shutdown::{kill_stragglers, pause_runs};
 use crate::runtime::PROXY;
@@ -22,6 +23,13 @@ struct State {
     /// Detached runs outlive the supervised processes, so once the worker has started, stopping it still owes a pause.
     runs_possible: bool,
     stopping: bool,
+}
+
+/// What a successful enrolment tells the owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Enrolled {
+    /// The name the board knows this machine by, read from config.json.
+    pub machine: Option<String>,
 }
 
 pub trait Host: Send + Sync {
@@ -72,17 +80,11 @@ pub struct WorkerControl<H = ProcessHost, I = BoardInit> {
     secrets: Arc<dyn SecretStore>,
     board: Arc<StatusBoard>,
     init: I,
-    machine: String,
     state: Mutex<State>,
 }
 
 impl WorkerControl {
-    pub fn new(
-        setup: WorkerSetup,
-        secrets: Arc<dyn SecretStore>,
-        board: Arc<StatusBoard>,
-        machine: String,
-    ) -> Self {
+    pub fn new(setup: WorkerSetup, secrets: Arc<dyn SecretStore>, board: Arc<StatusBoard>) -> Self {
         let init = BoardInit {
             board: setup.board.clone(),
             env: setup.env.clone(),
@@ -92,7 +94,7 @@ impl WorkerControl {
             processes: Processes::new(setup.clone(), board.clone()),
             setup,
         };
-        Self::with_parts(host, init, secrets, board, machine)
+        Self::with_parts(host, init, secrets, board)
     }
 
     pub fn prepare(
@@ -102,6 +104,15 @@ impl WorkerControl {
     ) -> Result<(), String> {
         layout::ensure(&self.host.setup.paths, bundled_board, app_executable)
             .map_err(|error| error.to_string())?;
+        machine::recover(
+            &self
+                .host
+                .setup
+                .paths
+                .worker_config_dir()
+                .join("config.json"),
+        )
+        .map_err(|error| error.to_string())?;
         discard_pending(self.secrets.as_ref()).map_err(|error| error.to_string())
     }
 }
@@ -112,14 +123,12 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
         init: I,
         secrets: Arc<dyn SecretStore>,
         board: Arc<StatusBoard>,
-        machine: String,
     ) -> Self {
         Self {
             host,
             secrets,
             board,
             init,
-            machine,
             state: Mutex::default(),
         }
     }
@@ -153,7 +162,7 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
     async fn connect(&self, state: &mut State, url: &str) {
         self.host.pause_runs(START_PAUSE_GRACE).await;
         if !self.host.web_json_names(url) {
-            if let Err(message) = self.init.run_init(url, &self.machine).await {
+            if let Err(message) = self.init.run_init(url).await {
                 return self.blocked(format!("board init: {message}"));
             }
         }
@@ -162,7 +171,7 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
         state.runs_possible = true;
     }
 
-    pub async fn enrol(&self, token: &str, data_key: &str) -> Result<(), EnrolError> {
+    pub async fn enrol(&self, token: &str, data_key: &str) -> Result<Enrolled, EnrolError> {
         let mut state = self.state.lock().await;
         if state.stopping {
             return Err(EnrolError::new("the app is quitting"));
@@ -176,21 +185,19 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
             state.started = false;
             self.host.pause_runs(START_PAUSE_GRACE).await;
         }
-        let outcome = enrol(
-            self.secrets.as_ref(),
-            &self.init,
-            &url,
-            &self.machine,
-            token,
-            data_key,
-        )
-        .await;
+        let outcome = enrol(self.secrets.as_ref(), &self.init, &url, token, data_key).await;
         match outcome {
-            Ok(()) => self.connect(&mut state, &url).await,
-            Err(_) if was_started => self.resume_with_enrolled_pair(&mut state, &url).await,
-            Err(_) => {}
+            Ok(InitReport { machine }) => {
+                self.connect(&mut state, &url).await;
+                Ok(Enrolled { machine })
+            }
+            Err(error) => {
+                if was_started {
+                    self.resume_with_enrolled_pair(&mut state, &url).await;
+                }
+                Err(error)
+            }
         }
-        outcome
     }
 
     async fn resume_with_enrolled_pair(&self, state: &mut State, url: &str) {
@@ -264,10 +271,12 @@ mod tests {
     }
 
     impl InitRunner for FakeInit {
-        async fn run_init(&self, _url: &str, _machine: &str) -> Result<(), String> {
+        async fn run_init(&self, _url: &str) -> Result<InitReport, String> {
             self.events.lock().unwrap().push("init");
             match &self.behaviour {
-                Init::Accepts => Ok(()),
+                Init::Accepts => Ok(InitReport {
+                    machine: Some("tnk_one".into()),
+                }),
                 Init::Refuses => Err("refused".into()),
                 Init::RefusesAndLocksTheStore(store) => {
                     store.arm();
@@ -298,7 +307,6 @@ mod tests {
             },
             store,
             board.clone(),
-            "mac".into(),
         );
         Rig {
             control,
@@ -331,6 +339,16 @@ mod tests {
         rig.control.enrol("abm_new", "abk1_new").await.unwrap();
 
         assert_eq!(seen(&rig), ["stop", "pause", "init", "pause", "start"]);
+    }
+
+    #[tokio::test]
+    async fn an_accepted_enrolment_reports_the_machine_the_board_named() {
+        let rig = rig(Init::Accepts, enrolled_store());
+        started(&rig).await;
+
+        let done = rig.control.enrol("abm_new", "abk1_new").await.unwrap();
+
+        assert_eq!(done.machine.as_deref(), Some("tnk_one"));
     }
 
     #[tokio::test]

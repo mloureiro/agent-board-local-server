@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-enrol-cancel"
+description = "Enables the enrol_cancel command without any pre-configured scope."
+commands.allow = ["enrol_cancel"]
+
+[[permission]]
+identifier = "deny-enrol-cancel"
+description = "Denies the enrol_cancel command without any pre-configured scope."
+commands.deny = ["enrol_cancel"]

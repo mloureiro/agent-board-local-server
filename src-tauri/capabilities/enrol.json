@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "enrol",
+  "description": "The enrolment window may submit the two values and close itself, and nothing else.",
+  "windows": ["enrol"],
+  "permissions": ["allow-enrol-submit", "allow-enrol-cancel"]
+}

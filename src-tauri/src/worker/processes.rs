@@ -8,6 +8,7 @@ use tokio::sync::{watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
+use super::report::worker_note;
 use crate::paths::AppPaths;
 use crate::supervisor::process::{describe_exit, stop_requested, with_log_tail};
 use crate::supervisor::{decide, Decision, ProcessSpec, RunningProcess, Status, StatusBoard};
@@ -15,6 +16,7 @@ use crate::supervisor::{decide, Decision, ProcessSpec, RunningProcess, Status, S
 pub const WORKER_LISTEN: &str = "worker-listen";
 pub const WORKER_WATCH: &str = "worker-watch";
 pub const DISPATCH: &str = "dispatch";
+pub const WORKER: &str = "worker";
 
 const TICK_EVERY: Duration = Duration::from_secs(120);
 const TICK_LIMIT: Duration = Duration::from_secs(110);
@@ -133,6 +135,10 @@ impl Processes {
             return;
         }
         let (stop, stopped) = watch::channel(false);
+        self.board.set(
+            WORKER,
+            Status::Note("waiting for the first dispatch tick".into()),
+        );
         let tasks = vec![
             tokio::spawn(supervise(
                 self.setup.clone(),
@@ -260,7 +266,12 @@ async fn dispatch_timer(
     loop {
         match run_tick(&setup, &mut stop).await {
             Ok(Tick::Stopped) => return,
-            Ok(Tick::Done(result)) => board.set(DISPATCH, Status::Note(result.label(&clock()))),
+            Ok(Tick::Done(result)) => {
+                board.set(DISPATCH, Status::Note(result.label(&clock())));
+                if let Some(note) = worker_note(&result, &setup.paths.log_file(DISPATCH)) {
+                    board.set(WORKER, Status::Note(note));
+                }
+            }
             Err(reason) => board.set(DISPATCH, Status::Note(format!("{reason} at {}", clock()))),
         }
         tokio::select! {

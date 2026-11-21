@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-enrol-submit"
+description = "Enables the enrol_submit command without any pre-configured scope."
+commands.allow = ["enrol_submit"]
+
+[[permission]]
+identifier = "deny-enrol-submit"
+description = "Denies the enrol_submit command without any pre-configured scope."
+commands.deny = ["enrol_submit"]

@@ -3,15 +3,16 @@ use tauri::{AppHandle, Wry};
 
 use crate::runtime::{BACKEND, PROXY};
 use crate::supervisor::{Status, StatusBoard};
-use crate::worker::processes::{DISPATCH, WORKER_LISTEN, WORKER_WATCH};
+use crate::worker::processes::{DISPATCH, WORKER, WORKER_LISTEN, WORKER_WATCH};
 
 pub const OPEN_BOARD: &str = "open-board";
 pub const CONNECT_WORKER: &str = "connect-worker";
 pub const QUIT: &str = "quit";
 
-const STATUS_ROWS: [(&str, &str, &str); 5] = [
+const STATUS_ROWS: [(&str, &str, &str); 6] = [
     (BACKEND, "Backend", "Backend: starting"),
     (PROXY, "Proxy", "Proxy: waiting"),
+    (WORKER, "Worker", "Worker: not connected"),
     (WORKER_LISTEN, "Worker listener", "Worker listener: waiting"),
     (WORKER_WATCH, "Worker watch", "Worker watch: waiting"),
     (

@@ -10,7 +10,9 @@
     "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": ["node"],
+    "allowJs": true,
+    "checkJs": true
   },
-  "include": ["scripts", "tests", "eslint.config.js", "vitest.config.ts", "vitest.smoke.config.ts"]
+  "include": ["scripts", "tests", "eslint.config.js", "vitest.config.ts", "vitest.smoke.config.ts", "ui"]
 }

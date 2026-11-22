@@ -113,7 +113,7 @@ async fn main() {
         }
     };
     let paths = AppPaths::new(&args.app_root);
-    let lock = match lock::acquire(&paths.lock_file()) {
+    let _lock = match lock::acquire(&paths.lock_file()) {
         Ok(lock) => lock,
         Err(LockError::AlreadyRunning) => {
             eprintln!("another instance holds {}", paths.lock_file().display());
@@ -171,13 +171,7 @@ async fn main() {
         }
     });
 
-    let handle = match runtime::start(
-        config,
-        lock,
-        Arc::new(MemoryStore::default()),
-        board.clone(),
-    )
-    .await
+    let handle = match runtime::start(config, Arc::new(MemoryStore::default()), board.clone()).await
     {
         Ok(handle) => handle,
         Err(error) => {

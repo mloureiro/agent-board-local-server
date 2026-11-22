@@ -171,7 +171,124 @@ pub async fn stop_requested(stop: &mut tokio::sync::watch::Receiver<bool>) {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::Instant;
+
     use super::*;
+
+    const GRACE: Duration = Duration::from_millis(200);
+    const SLACK: Duration = Duration::from_secs(5);
+    const LONG_GRACE: Duration = Duration::from_secs(30);
+    const FAST: Duration = Duration::from_secs(10);
+    const DEADLINE: Duration = Duration::from_secs(5);
+    const POLL: Duration = Duration::from_millis(10);
+
+    fn spec(name: &'static str, program: &str, args: &[&str]) -> ProcessSpec {
+        ProcessSpec {
+            name,
+            program: program.into(),
+            args: args.iter().map(OsString::from).collect(),
+            env: BTreeMap::new(),
+        }
+    }
+
+    struct KillOnDrop {
+        group: Option<u32>,
+        pid: Option<i32>,
+    }
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            if let Some(group) = self.group {
+                signal_group(group, libc::SIGKILL);
+            }
+            if let Some(pid) = self.pid {
+                // SAFETY: kill only sends a signal; a pid that is gone is reported as an error we ignore.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+    }
+
+    async fn ready_pid(log: &Path) -> i32 {
+        let started = Instant::now();
+        loop {
+            let pid = fs::read_to_string(log).ok().and_then(|text| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix("ready ")?.trim().parse().ok())
+            });
+            if let Some(pid) = pid {
+                return pid;
+            }
+            assert!(
+                started.elapsed() < DEADLINE,
+                "the child never reported ready"
+            );
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    async fn gone(pid: i32) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < DEADLINE {
+            // SAFETY: signal 0 only checks that the pid exists.
+            let missing = unsafe { libc::kill(pid, 0) } == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            if missing {
+                return true;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn a_child_that_ignores_sigterm_is_killed_with_its_group_after_the_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path());
+        let script = r#"trap "" TERM; /bin/sleep 60 & echo "ready $!"; wait"#;
+        let mut process =
+            RunningProcess::spawn(&spec("stubborn", "/bin/sh", &["-c", script]), &paths).unwrap();
+        let mut guard = KillOnDrop {
+            group: Some(process.pid),
+            pid: None,
+        };
+        let grandchild = ready_pid(&paths.log_file("stubborn")).await;
+        guard.pid = Some(grandchild);
+
+        let started = Instant::now();
+        let stopped = tokio::time::timeout(GRACE + SLACK, process.stop(GRACE)).await;
+        guard.group = None;
+
+        assert!(started.elapsed() >= GRACE);
+        let Ok(Ok(status)) = stopped else {
+            panic!("stop did not finish: {stopped:?}");
+        };
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+        assert!(!paths.pidfile("stubborn").exists());
+        assert!(gone(grandchild).await);
+        guard.pid = None;
+    }
+
+    #[tokio::test]
+    async fn a_child_that_obeys_sigterm_stops_before_the_grace_runs_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path());
+        let mut process =
+            RunningProcess::spawn(&spec("obedient", "/bin/sleep", &["60"]), &paths).unwrap();
+        let mut guard = KillOnDrop {
+            group: Some(process.pid),
+            pid: None,
+        };
+
+        let stopped = tokio::time::timeout(FAST, process.stop(LONG_GRACE)).await;
+        guard.group = None;
+
+        let Ok(Ok(status)) = stopped else {
+            panic!("stop did not finish: {stopped:?}");
+        };
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
+        assert!(!paths.pidfile("obedient").exists());
+    }
 
     #[test]
     fn a_log_over_the_limit_moves_to_the_previous_generation() {

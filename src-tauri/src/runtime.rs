@@ -8,7 +8,6 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::backend::{self, HEALTH_LIMIT, HEALTH_POLL};
-use crate::lock::Lock;
 use crate::paths::{AppPaths, Resources, Sidecars};
 use crate::proxy::{Proxy, ProxyConfig};
 use crate::secrets::{proxy_secret, SecretError, SecretStore};
@@ -74,7 +73,6 @@ pub struct Handle {
     proxy_task: JoinHandle<()>,
     backend_task: JoinHandle<()>,
     worker: Option<Arc<WorkerControl>>,
-    _lock: Lock,
 }
 
 impl Handle {
@@ -90,7 +88,7 @@ impl Handle {
     }
 
     /// Stops in reverse order of the start, so that the runs can report as paused while the board is still up:
-    /// worker, proxy, backend. Returns once all of it has stopped; the lock is released afterwards.
+    /// worker, proxy, backend. Returns once all of it has stopped.
     pub async fn stop(self) {
         let _ = self.stop_worker.send(true);
         let _ = self.worker_task.await;
@@ -103,7 +101,6 @@ impl Handle {
 
 pub async fn start(
     config: Config,
-    lock: Lock,
     secrets: Arc<dyn SecretStore>,
     board: Arc<StatusBoard>,
 ) -> Result<Handle, StartError> {
@@ -172,7 +169,6 @@ pub async fn start(
         proxy_task,
         backend_task,
         worker,
-        _lock: lock,
     })
 }
 

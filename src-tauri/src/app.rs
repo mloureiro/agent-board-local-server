@@ -18,6 +18,20 @@ fn login_name() -> String {
 }
 
 pub fn run() {
+    let Some(root) = AppPaths::configured_root() else {
+        eprintln!("HOME is not set; the app root cannot be found");
+        std::process::exit(1);
+    };
+    let paths = AppPaths::new(root.clone());
+    let _lock = match lock::acquire(&paths.lock_file()) {
+        Ok(lock) => lock,
+        Err(LockError::AlreadyRunning) => std::process::exit(0),
+        Err(LockError::Io(error)) => {
+            eprintln!("cannot take the app lock: {error}");
+            std::process::exit(1);
+        }
+    };
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             enrol_window::window::enrol_submit,
@@ -27,24 +41,11 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            let Some(root) = AppPaths::configured_root() else {
-                eprintln!("HOME is not set; the app root cannot be found");
-                std::process::exit(1);
-            };
             let keychain = Keychain::for_root(&root);
-            let paths = AppPaths::new(root);
-            let lock = match lock::acquire(&paths.lock_file()) {
-                Ok(lock) => lock,
-                Err(LockError::AlreadyRunning) => std::process::exit(0),
-                Err(LockError::Io(error)) => {
-                    eprintln!("cannot take the app lock: {error}");
-                    std::process::exit(1);
-                }
-            };
 
             let tray_menu = Arc::new(TrayMenu::build(app.handle())?);
 
@@ -125,7 +126,7 @@ pub fn run() {
                         }),
                     paths: paths.clone(),
                 };
-                match runtime::start(config, lock, proxy_secrets, board.clone()).await {
+                match runtime::start(config, proxy_secrets, board.clone()).await {
                     Ok(running) => {
                         apply_autostart(&handle, &paths);
                         *startup = Some(running);

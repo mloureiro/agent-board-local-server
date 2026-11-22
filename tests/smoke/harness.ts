@@ -8,7 +8,7 @@ export const repoRoot = resolve(import.meta.dirname, '../..');
 const tauriDir = join(repoRoot, 'src-tauri');
 const runnerBinary = join(tauriDir, 'target/debug/examples/headless');
 
-export const stagedCaddyfile = join(tauriDir, 'resources/Caddyfile');
+export const pinnedCaddyfile = join(repoRoot, 'core.Caddyfile');
 export const stagedFrontend = join(tauriDir, 'resources/frontend');
 
 function readJson(path: string): Record<string, unknown> {

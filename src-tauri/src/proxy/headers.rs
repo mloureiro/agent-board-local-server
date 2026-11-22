@@ -49,9 +49,8 @@ mod tests {
 
     type Pairs = BTreeSet<(String, String)>;
 
-    fn staged_caddyfile() -> String {
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/Caddyfile"))
-            .expect("pnpm core:build stages the Caddyfile")
+    fn pinned_caddyfile() -> &'static str {
+        include_str!("../../../core.Caddyfile")
     }
 
     fn pair(line: &str) -> Option<(String, String)> {
@@ -105,7 +104,7 @@ mod tests {
 
     #[test]
     fn the_tables_equal_the_pinned_caddyfile_and_the_data_set_wins_on_overlap() {
-        assert_eq!(drift(&staged_caddyfile()), Vec::<&str>::new());
+        assert_eq!(drift(pinned_caddyfile()), Vec::<&str>::new());
 
         let mut headers = HeaderMap::new();
         apply_page(&mut headers);
@@ -119,7 +118,7 @@ mod tests {
 
     #[test]
     fn a_changed_added_or_dropped_caddyfile_header_is_drift() {
-        let pinned = staged_caddyfile();
+        let pinned = pinned_caddyfile();
         let downgraded = pinned.replace(
             "Cross-Origin-Opener-Policy \"same-origin\"",
             "Cross-Origin-Opener-Policy \"unsafe-none\"",

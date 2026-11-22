@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { freePort, pinnedCommit, repoRoot, scratchDir, stagedCaddyfile, stagedFrontend } from './harness.ts';
+import { freePort, pinnedCommit, repoRoot, scratchDir, pinnedCaddyfile, stagedFrontend } from './harness.ts';
 
 export function dockerAvailable(): boolean {
   return spawnSync('docker', ['info'], { stdio: 'ignore' }).status === 0;
@@ -30,7 +30,7 @@ export async function startCaddy(options: { image: string; stubPort: number; sec
   if (spawnSync('docker', ['image', 'inspect', options.image], { stdio: 'ignore' }).status !== 0) {
     docker(['pull', options.image]);
   }
-  const caddyfile = readFileSync(stagedCaddyfile, 'utf8');
+  const caddyfile = readFileSync(pinnedCaddyfile, 'utf8');
   if (caddyfile.split('backend:4000').length !== 2)
     throw new Error('The pinned Caddyfile no longer proxies backend:4000 once');
   const file = join(scratchDir('abls-caddy-'), 'Caddyfile');

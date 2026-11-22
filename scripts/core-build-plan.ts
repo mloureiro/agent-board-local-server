@@ -4,6 +4,7 @@ export const TARGET_TRIPLE = 'aarch64-apple-darwin';
 export const BUN_TARGET = 'bun-darwin-arm64';
 export const CLI_TARGET = 'darwin-arm64';
 export const BUILD_MANIFEST = 'resources/core-build.json';
+export const CADDYFILE_COPY = 'core.Caddyfile';
 
 export const REQUIRED_TOOLS = ['git', 'pnpm', 'bun'] as const;
 
@@ -22,12 +23,16 @@ export interface StagingStep {
 export const stagingPlan = (): StagingStep[] => [
   { from: 'apps/frontend/dist', to: 'resources/frontend' },
   { from: 'apps/backend/drizzle', to: 'resources/drizzle' },
-  { from: 'apps/frontend/Caddyfile', to: 'resources/Caddyfile' },
   ...['pglite.wasm', 'initdb.wasm', 'pglite.data'].map((name) => ({
     from: posix.join('apps/backend/node_modules/@electric-sql/pglite/dist', name),
     to: posix.join('resources/pglite', name),
   })),
 ];
+
+export const caddyfileCopyError = (pinned: string, committed: string): string | null =>
+  pinned === committed
+    ? null
+    : `${CADDYFILE_COPY} differs from apps/frontend/Caddyfile at the pinned commit; copy the pinned file over ${CADDYFILE_COPY} and run pnpm test so the header tables are checked against it`;
 
 export const stagedBinaries = {
   server: `binaries/board-server-${TARGET_TRIPLE}`,

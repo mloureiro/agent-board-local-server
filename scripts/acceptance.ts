@@ -22,6 +22,8 @@ import {
   isLoopbackAddress,
   listenAddresses,
   parseProcessRows,
+  ROOT_SECRET_ACCOUNTS,
+  runsAppExecutable,
   survivors,
   type ProcessRow,
 } from './acceptance-checks.ts';
@@ -160,7 +162,7 @@ async function main(): Promise<void> {
   let port: number;
   let dataDir: string;
   if (root === defaultRoot) {
-    if (existsSync(join(root, 'app.lock')) && processes().some((row) => row.command.includes(`${EXECUTABLE}`)))
+    if (existsSync(join(root, 'app.lock')) && processes().some((row) => runsAppExecutable(row.command, EXECUTABLE)))
       throw new Error('The app already runs on its default root; quit it first');
     const settingsFile = join(root, 'settings.json');
     const settings = existsSync(settingsFile)
@@ -288,9 +290,9 @@ async function main(): Promise<void> {
     }
     if (scratch && !options.keep) {
       rmSync(root, { recursive: true, force: true });
-      spawnSync('security', ['delete-generic-password', '-s', `${APP_IDENTIFIER}.root:${root}`, '-a', 'proxy-secret'], {
-        stdio: 'ignore',
-      });
+      const service = `${APP_IDENTIFIER}.root:${root}`;
+      for (const account of ROOT_SECRET_ACCOUNTS)
+        spawnSync('security', ['delete-generic-password', '-s', service, '-a', account], { stdio: 'ignore' });
     }
   }
 }

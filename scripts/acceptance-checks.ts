@@ -52,3 +52,20 @@ export function isInside(path: string, directory: string): boolean {
   const normal = directory.endsWith('/') ? directory : `${directory}/`;
   return path === directory || path.startsWith(normal);
 }
+
+export function runsAppExecutable(command: string, executable: string): boolean {
+  const needle = `.app/Contents/MacOS/${executable}`;
+  for (let at = command.indexOf(needle); at !== -1; at = command.indexOf(needle, at + 1)) {
+    const next = command.charAt(at + needle.length);
+    if (next === '' || /\s/.test(next)) return true;
+  }
+  return false;
+}
+
+export const ROOT_SECRET_ACCOUNTS = [
+  'proxy-secret',
+  'worker-token',
+  'worker-data-key',
+  'worker-token-pending',
+  'worker-data-key-pending',
+] as const;

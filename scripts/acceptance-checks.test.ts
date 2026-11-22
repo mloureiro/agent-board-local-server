@@ -6,6 +6,7 @@ import {
   isLoopbackAddress,
   listenAddresses,
   parseProcessRows,
+  runsAppExecutable,
   survivors,
 } from './acceptance-checks.ts';
 
@@ -68,5 +69,33 @@ describe('isInside', () => {
     expect(isInside('/a/worker/bin', '/a/worker')).toBe(true);
     expect(isInside('/a/worker', '/a/worker')).toBe(true);
     expect(isInside('/a/worker-two', '/a/worker')).toBe(false);
+  });
+});
+
+describe('runsAppExecutable()', () => {
+  const executable = 'agent-board-local-server';
+  const cases: [string, string, boolean][] = [
+    ['an installed app', '/Applications/Agent Board Server.app/Contents/MacOS/agent-board-local-server', true],
+    [
+      'a dev bundle with launch arguments',
+      '/Users/me/repo/src-tauri/target/release/bundle/macos/Agent Board Server.app/Contents/MacOS/agent-board-local-server -psn_0_123',
+      true,
+    ],
+    [
+      'an editor opened on the repository',
+      '/Applications/Visual Studio Code.app/Contents/MacOS/Electron /Users/me/workspace/agent-board-local-server',
+      false,
+    ],
+    [
+      'the acceptance script itself',
+      'node scripts/acceptance.ts --app /Users/me/workspace/agent-board-local-server/src-tauri/target/release/bundle/macos/Agent Board Server.app',
+      false,
+    ],
+    ['a sidecar of the same bundle', '/Applications/Agent Board Server.app/Contents/MacOS/board-server', false],
+    ['a longer executable name', '/Applications/X.app/Contents/MacOS/agent-board-local-server-helper', false],
+  ];
+
+  it.each(cases)('%s', (_name, command, expected) => {
+    expect(runsAppExecutable(command, executable)).toBe(expected);
   });
 });

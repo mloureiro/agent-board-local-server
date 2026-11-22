@@ -82,6 +82,21 @@ describe('runsAppExecutable()', () => {
       true,
     ],
     [
+      'the raw debug binary run by the dev server',
+      '/Users/me/repo/src-tauri/target/debug/agent-board-local-server',
+      true,
+    ],
+    [
+      'the raw release binary with arguments',
+      '/Users/me/repo/src-tauri/target/release/agent-board-local-server --flag',
+      true,
+    ],
+    [
+      'a longer name in the cargo output',
+      '/Users/me/repo/src-tauri/target/debug/agent-board-local-server-helper',
+      false,
+    ],
+    [
       'an editor opened on the repository',
       '/Applications/Visual Studio Code.app/Contents/MacOS/Electron /Users/me/workspace/agent-board-local-server',
       false,

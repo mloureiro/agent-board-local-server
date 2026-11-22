@@ -109,6 +109,19 @@ export function killStrays(): void {
   scratchRoots.clear();
 }
 
+export async function tearDown(...steps: Array<() => unknown>): Promise<void> {
+  const failures: unknown[] = [];
+  for (const step of steps) {
+    try {
+      await step();
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, 'Several teardown steps failed');
+}
+
 export function scratchDir(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   scratchRoots.add(dir);

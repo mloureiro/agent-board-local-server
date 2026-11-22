@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { countLabel, viewFor } from './enrol-view.js';
+import { countLabel, viewFor } from '../../ui/enrol-view.js';
 
 describe('the enrolment window', () => {
   it('shows "Connecting…" with the form disabled and nothing to cancel while the board is asked', () => {

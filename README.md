@@ -48,7 +48,7 @@ The `PATH` the worker gets is written out by the app (`worker/bin`, `~/.local/bi
 
 Until the machine is enrolled the tray shows "Worker not connected". "Connect worker…" (later "Reconnect worker…") opens a small window of the app's own, with the machine token and the data key from the board's Settings page in two masked fields, each drawn with one dot per character (a count under each field says how many characters it holds). There is no machine-name field: the board names the machine after the token. "Connect" disables the form and shows "Connecting…"; the window stays open until the board has answered. On success it says "Connected as <machine name>" with a Close button; on a refusal it stays on the form with the reason (token refused, data key not the board's, board unreachable) and nothing is stored. Cancel stores nothing, the window cannot be closed while the board is being asked, and Quit closes it and exits.
 
-The app stores the two values as pending Keychain items, lets `board init` check them against the board (it asks the board before writing any file) and, only when it accepts them, keeps them. Reconnecting stops the worker and asks its running cards to pause first, as Quit does, so they do not pick up the new pair before the board has accepted it; the worker starts again with whichever pair ends up enrolled and the paused cards resume on the next dispatch tick. A card whose agent cannot be paused (a known gap in the pinned core) keeps running.
+The app stores the two values as pending Keychain items, lets `board init` check them against the board (it asks the board before writing any file) and, only when it accepts them, keeps them. Reconnecting stops the worker and asks its running cards to pause first, as Quit does, so they do not pick up the new pair before the board has accepted it; the worker starts again with whichever pair ends up enrolled and the paused cards resume on the next dispatch tick.
 
 The window is a Tauri webview that loads the static page in `ui/`. Only the two commands it needs (`enrol_submit`, `enrol_cancel`) are exposed, to that window only (`src-tauri/capabilities/enrol.json`); the page's content security policy allows nothing but its own files and the app's IPC.
 
@@ -62,7 +62,7 @@ cargo run --example headless -- --app-root <dir> --port <port> --enrol-from-stdi
 
 `--worker` starts an already enrolled worker from that runner's own Keychain items (one Keychain service per app root, so a scratch root never touches the app's items).
 
-On Quit the dispatch tick, the listener and the watch unit get SIGTERM, then the running cards are asked to pause through `board internal shutdown --grace 20`, which leaves them resumable on this machine, then any worker still left is killed, and only then do the proxy and the backend stop. The whole sequence takes about 30 s at most.
+On Quit the dispatch tick, the listener and the watch unit get SIGTERM, then the running cards are asked to pause through `board internal shutdown --grace 20`, which leaves them resumable on this machine, then any worker still left is killed, and only then do the proxy and the backend stop. The whole sequence takes about a minute at most.
 
 To use the bundled CLI by hand (to add directories or lanes, for example), give it the worker's directories and the credentials link:
 

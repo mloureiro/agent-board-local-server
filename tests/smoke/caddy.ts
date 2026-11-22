@@ -60,11 +60,10 @@ export async function startCaddy(options: { image: string; stubPort: number; sec
 
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
-    try {
-      if ((await fetch(`http://127.0.0.1:${port}/`)).status === 200) return caddy;
-    } catch {
-      await new Promise((done) => setTimeout(done, 200));
-    }
+    const response = await fetch(`http://127.0.0.1:${port}/`).catch(() => undefined);
+    if (response?.status === 200) return caddy;
+    await response?.body?.cancel();
+    await new Promise((done) => setTimeout(done, 200));
   }
   const logs = spawnSync('docker', ['logs', name], { encoding: 'utf8' });
   caddy.stop();

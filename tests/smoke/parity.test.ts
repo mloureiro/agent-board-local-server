@@ -88,9 +88,12 @@ describe('the proxy against the pinned Caddy', () => {
 
   afterAll(async () => {
     caddy?.stop();
-    await runner?.stop().catch(() => undefined);
-    await stub?.stop().catch(() => undefined);
-    killStrays();
+    try {
+      await runner?.stop();
+    } finally {
+      await stub?.stop();
+      killStrays();
+    }
   }, 60_000);
 
   const asset = () => {

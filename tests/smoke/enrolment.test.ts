@@ -65,13 +65,17 @@ describe('worker enrolment against the built board', () => {
   }, 300_000);
 
   afterAll(async () => {
-    await runner?.stop().catch(() => undefined);
-    if (runner !== undefined) {
-      const service = `dev.mloureiro.agent-board-local-server.headless:${runner.appRoot}`;
-      for (let item = 0; item < 4; item += 1)
-        if (spawnSync('security', ['delete-generic-password', '-s', service], { stdio: 'ignore' }).status !== 0) break;
+    try {
+      await runner?.stop();
+    } finally {
+      if (runner !== undefined) {
+        const service = `dev.mloureiro.agent-board-local-server.headless:${runner.appRoot}`;
+        for (let item = 0; item < 4; item += 1)
+          if (spawnSync('security', ['delete-generic-password', '-s', service], { stdio: 'ignore' }).status !== 0)
+            break;
+      }
+      killStrays();
     }
-    killStrays();
   }, 60_000);
 
   it('connects a token issued to another name under the name the board gives, then follows a token for a third', async () => {

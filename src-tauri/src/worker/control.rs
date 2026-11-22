@@ -209,9 +209,12 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
+    use crate::paths::AppPaths;
     use crate::secrets::testing::DeletesFailWhenArmed;
     use crate::secrets::MemoryStore;
     use crate::worker::credentials::{DATA_KEY_ACCOUNT, TOKEN_ACCOUNT};
@@ -222,6 +225,7 @@ mod tests {
 
     struct FakeHost {
         events: Events,
+        web_json_url: &'static str,
     }
 
     impl Host for FakeHost {
@@ -241,8 +245,8 @@ mod tests {
             self.events.lock().unwrap().push("kill");
         }
 
-        fn web_json_names(&self, _url: &str) -> bool {
-            true
+        fn web_json_names(&self, url: &str) -> bool {
+            url == self.web_json_url
         }
     }
 
@@ -282,12 +286,21 @@ mod tests {
     }
 
     fn rig(behaviour: Init, store: Arc<dyn SecretStore>) -> Rig {
+        rig_with_web_json(behaviour, store, "http://127.0.0.1:4785")
+    }
+
+    fn rig_with_web_json(
+        behaviour: Init,
+        store: Arc<dyn SecretStore>,
+        web_json_url: &'static str,
+    ) -> Rig {
         let events: Events = Arc::default();
         let board = Arc::new(StatusBoard::default());
         board.set(PROXY, Status::Running { port: 4785 });
         let control = WorkerControl::with_parts(
             FakeHost {
                 events: events.clone(),
+                web_json_url,
             },
             FakeInit {
                 events: events.clone(),
@@ -401,5 +414,93 @@ mod tests {
         rig.control.stop().await;
 
         assert_eq!(seen(&rig), ["stop", "kill"]);
+    }
+    #[tokio::test]
+    async fn a_moved_proxy_port_reruns_board_init_before_the_worker_starts() {
+        let rig = rig_with_web_json(Init::Accepts, enrolled_store(), "http://127.0.0.1:4790");
+
+        rig.control.proxy_ready().await;
+
+        assert_eq!(seen(&rig), ["pause", "init", "start"]);
+    }
+
+    #[tokio::test]
+    async fn a_web_json_naming_the_running_proxy_starts_the_worker_without_board_init() {
+        let rig = rig(Init::Accepts, enrolled_store());
+
+        rig.control.proxy_ready().await;
+
+        assert_eq!(seen(&rig), ["pause", "start"]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_reinit_at_start_leaves_the_worker_blocked_and_stopped() {
+        let rig = rig_with_web_json(Init::Refuses, enrolled_store(), "http://127.0.0.1:4790");
+
+        rig.control.proxy_ready().await;
+
+        assert_eq!(seen(&rig), ["pause", "init"]);
+        let Some(Status::Blocked { reason }) = rig.board.get(WORKER_LISTEN) else {
+            panic!("the worker should be blocked");
+        };
+        assert!(reason.starts_with("board init:"));
+    }
+
+    fn host_over(root: &Path) -> ProcessHost {
+        let setup = Arc::new(WorkerSetup {
+            paths: AppPaths::new(root),
+            board: PathBuf::new(),
+            env: BTreeMap::new(),
+            lockf: PathBuf::new(),
+        });
+        ProcessHost {
+            processes: Processes::new(setup.clone(), Arc::new(StatusBoard::default())),
+            setup,
+        }
+    }
+
+    fn web_json(root: &Path, contents: &str) {
+        let dir = AppPaths::new(root).worker_config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("web.json"), contents).unwrap();
+    }
+
+    const URL: &str = "http://127.0.0.1:4785";
+
+    #[test]
+    fn a_web_json_naming_the_proxy_matches_with_or_without_a_trailing_slash() {
+        let root = tempfile::tempdir().unwrap();
+        let host = host_over(root.path());
+
+        web_json(root.path(), r#"{"url":"http://127.0.0.1:4785"}"#);
+        assert!(host.web_json_names(URL));
+        web_json(root.path(), r#"{"url":"http://127.0.0.1:4785/"}"#);
+        assert!(host.web_json_names(URL));
+    }
+
+    #[test]
+    fn a_web_json_naming_another_port_does_not_match() {
+        let root = tempfile::tempdir().unwrap();
+        web_json(root.path(), r#"{"url":"http://127.0.0.1:4790"}"#);
+
+        assert!(!host_over(root.path()).web_json_names(URL));
+    }
+
+    #[test]
+    fn a_missing_web_json_names_nothing() {
+        let root = tempfile::tempdir().unwrap();
+
+        assert!(!host_over(root.path()).web_json_names(URL));
+    }
+
+    #[test]
+    fn an_unreadable_web_json_names_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let host = host_over(root.path());
+
+        for contents in ["not json", r#"{"url":4785}"#, "{}"] {
+            web_json(root.path(), contents);
+            assert!(!host.web_json_names(URL), "{contents}");
+        }
     }
 }

@@ -82,16 +82,18 @@ AGENT_BOARD_CONFIG_DIR="$R/config" AGENT_BOARD_STATE_DIR="$R/state" AGENT_BOARD_
 
 ```sh
 pnpm install
-pnpm core:build     # build the pinned core and stage it for the app
-pnpm dev            # run the app from source (builds the core first)
-pnpm build          # build the ad-hoc signed .app into src-tauri/target/release/bundle/macos
-pnpm format:check
+pnpm format:check   # format:check, lint, typecheck and test run on a fresh checkout, no core:build needed
 pnpm lint
 pnpm typecheck
 pnpm test
+pnpm core:build     # build the pinned core and stage it for the app
+pnpm dev            # run the app from source (builds the core first)
+pnpm build          # build the ad-hoc signed .app into src-tauri/target/release/bundle/macos
 pnpm test:smoke     # black-box suite against the built sidecar; run pnpm core:build first
 pnpm acceptance     # checks the built .app on a scratch app root; see below
 ```
+
+`dev` and `build` run `core:build` themselves. `test:smoke` and `acceptance` need it done first.
 
 ## Acceptance
 
@@ -100,6 +102,8 @@ pnpm acceptance     # checks the built .app on a scratch app root; see below
 `pnpm acceptance:binary` compiles the same script into `dist/acceptance` with Bun, for a Mac that has neither Node nor Bun.
 
 ## Upgrading the pin
+
+A pin move copies the pinned `apps/frontend/Caddyfile` over `core.Caddyfile` in the same change. `pnpm core:build` fails until the two are equal. Then `pnpm test` runs the header drift test against the new pin.
 
 `pnpm core:build --pin <pin-file> --out <dir>` builds another pin into a staging folder of its own and never touches the app's staging. `cargo run --example headless -- --app-root <dir> --core <dir>` runs a build from such a folder on a data folder, so a database made by an older pin can be opened by the new one.
 
@@ -115,10 +119,13 @@ The header-parity test runs the Caddy image named by `ARG CADDY_IMAGE` in the pi
 
 - `src-tauri/binaries/board-server-aarch64-apple-darwin` and `board-aarch64-apple-darwin`, ad-hoc signed because a fresh Bun executable is killed at launch on macOS until it is signed
 - `src-tauri/resources/frontend/`, `drizzle/` and `pglite/` (the three PGlite files the compiled backend cannot find on its own)
-- `src-tauri/resources/Caddyfile`, kept out of the bundle
 - `src-tauri/resources/core-build.json`: the pin commit, the Bun version and the sha256 of every staged file
 
+The build refuses a pin whose `apps/frontend/Caddyfile` differs from `core.Caddyfile`, the committed copy the header drift test reads.
+
 A second run does nothing while that file matches the pin and every staged file.
+
+Until the core is staged, the Rust build leaves the sidecars and resources out of its own config so `cargo check` and `pnpm test` compile on a fresh checkout. The bundle still needs them: `pnpm build` runs `core:build` first and the bundler fails on a missing sidecar.
 
 ## Distribution
 

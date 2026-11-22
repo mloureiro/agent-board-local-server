@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   bunVersionError,
+  caddyfileCopyError,
   isBuildCurrent,
   missingTools,
   parseBuildArgs,
@@ -54,12 +55,23 @@ describe('missingTools', () => {
   });
 });
 
+describe('caddyfileCopyError', () => {
+  const pinned = '\t\tReferrer-Policy "no-referrer"\n';
+
+  it('accepts a copy equal to the pinned file', () => {
+    expect(caddyfileCopyError(pinned, pinned)).toBeNull();
+  });
+
+  it('names the committed copy when a header line differs', () => {
+    expect(caddyfileCopyError(pinned, pinned.replace('no-referrer', 'origin'))).toContain('core.Caddyfile');
+  });
+});
+
 describe('stagingPlan', () => {
-  it('stages the frontend, migrations, Caddyfile and the three PGlite files under resources', () => {
+  it('stages the frontend, migrations and the three PGlite files under resources', () => {
     expect(stagingPlan().map((step) => step.to)).toEqual([
       'resources/frontend',
       'resources/drizzle',
-      'resources/Caddyfile',
       'resources/pglite/pglite.wasm',
       'resources/pglite/initdb.wasm',
       'resources/pglite/pglite.data',

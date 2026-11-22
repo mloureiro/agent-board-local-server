@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import {
   BUILD_MANIFEST,
   BUN_TARGET,
+  CADDYFILE_COPY,
+  caddyfileCopyError,
   CLI_TARGET,
   isBuildCurrent,
   bunVersionError,
@@ -53,6 +55,7 @@ function hashStaged(stageDir: string): Record<string, string> {
 const recipeFingerprint = (): string => {
   const hash = createHash('sha256');
   for (const file of ['build-core.ts', 'core-build-plan.ts']) hash.update(readFileSync(join(root, 'scripts', file)));
+  hash.update(readFileSync(join(root, CADDYFILE_COPY)));
   return hash.digest('hex');
 };
 
@@ -122,6 +125,11 @@ function main(): void {
   }
 
   const coreDir = materialise(pin.repository, pin.commit);
+  const copyError = caddyfileCopyError(
+    readFileSync(join(coreDir, 'apps/frontend/Caddyfile'), 'utf8'),
+    readFileSync(join(root, CADDYFILE_COPY), 'utf8'),
+  );
+  if (copyError !== null) throw new Error(copyError);
   const bunError = bunVersionError(parsePinnedBun(readFileSync(join(coreDir, 'mise.toml'), 'utf8')), bun);
   if (bunError !== null) throw new Error(bunError);
   run('pnpm', ['install', '--frozen-lockfile'], coreDir);

@@ -2,7 +2,7 @@ import { readdirSync } from 'node:fs';
 import { request as httpRequest } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { dockerAvailable, pinnedCaddyImage, startCaddy, type Caddy } from './caddy.ts';
-import { killStrays, requireStagedCore, startRunner, stagedFrontend, type Runner } from './harness.ts';
+import { killStrays, requireStagedCore, startRunner, stagedFrontend, tearDown, type Runner } from './harness.ts';
 import { startStubBackend, type Stub } from './stub-backend.ts';
 
 interface Probe {
@@ -86,15 +86,16 @@ describe('the proxy against the pinned Caddy', () => {
     caddy = await startCaddy({ image: pinnedCaddyImage(), stubPort: stub.port, secret: 'parity-secret' });
   }, 240_000);
 
-  afterAll(async () => {
-    caddy?.stop();
-    try {
-      await runner?.stop();
-    } finally {
-      await stub?.stop();
-      killStrays();
-    }
-  }, 60_000);
+  afterAll(
+    () =>
+      tearDown(
+        () => caddy?.stop(),
+        () => runner?.stop(),
+        () => stub?.stop(),
+        killStrays,
+      ),
+    60_000,
+  );
 
   const asset = () => {
     const name = readdirSync(`${stagedFrontend}/assets`).find((file) => file.endsWith('.js'));

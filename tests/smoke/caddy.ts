@@ -60,7 +60,9 @@ export async function startCaddy(options: { image: string; stubPort: number; sec
 
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
-    const response = await fetch(`http://127.0.0.1:${port}/`).catch(() => undefined);
+    const response = await fetch(`http://127.0.0.1:${port}/`, {
+      signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+    }).catch(() => undefined);
     if (response?.status === 200) return caddy;
     await response?.body?.cancel();
     await new Promise((done) => setTimeout(done, 200));

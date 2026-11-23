@@ -15,7 +15,6 @@ const DATA_KEY_NAME: &str = "AGENT_BOARD_DATA_KEY";
 pub const HELPER_FLAG: &str = "--worker-credentials";
 /// The CLI runs its credentials command without arguments, so the app is reached through a link of this name.
 pub const HELPER_LINK: &str = "worker-credentials";
-/// The link only the validating `board init` is pointed at; it prints the pending pair and nothing else.
 pub const PENDING_HELPER_LINK: &str = "worker-credentials-pending";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,8 +101,7 @@ impl fmt::Display for HelperError {
     }
 }
 
-/// What the CLI reads through `AGENT_BOARD_CREDENTIALS_COMMAND`: the enrolled pair for every process, and the
-/// pending pair only for the `board init` that validates it before it is promoted.
+/// What the CLI reads through `AGENT_BOARD_CREDENTIALS_COMMAND`.
 pub fn helper_output(store: &dyn SecretStore, pair: Pair) -> Result<String, HelperError> {
     let current = match pair {
         Pair::Enrolled => read_pair(store, TOKEN_ACCOUNT, DATA_KEY_ACCOUNT)

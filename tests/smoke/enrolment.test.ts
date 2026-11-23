@@ -128,7 +128,7 @@ describe('worker enrolment against the built board', () => {
     expect(runner.tree().filter((pid) => treeBefore.includes(pid))).toEqual(treeBefore);
     expect(keychainHas('worker-token-pending')).toBe(false);
     expect(keychainHas('worker-data-key-pending')).toBe(false);
-    expect(credentialsLink('worker-credentials-pending').status).not.toBe(0);
+    expect(credentialsLink('worker-credentials-pending').status).toBe(1);
   }, 180_000);
 
   it('never serves a pending pair through the link the running worker uses', () => {

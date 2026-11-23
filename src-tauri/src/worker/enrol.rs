@@ -184,8 +184,6 @@ fn looks_like_secret(word: &str) -> bool {
     })
 }
 
-/// Checks a pair with the board through the pending link. An accepted pair stays pending, so the caller promotes
-/// it after stopping the running worker; a refused one is discarded.
 pub async fn validate<R: InitRunner>(
     store: &dyn SecretStore,
     runner: &R,

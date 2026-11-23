@@ -9,6 +9,7 @@ use crate::applog::LogFile;
 use crate::core_build::CoreBuild;
 use crate::enrol_window;
 use crate::lock::{self, LockError};
+use crate::login_item;
 use crate::paths::{AppPaths, Resources, Sidecars};
 use crate::runtime::{self, Config, Running, WorkerConfig};
 use crate::secrets::Keychain;
@@ -41,10 +42,6 @@ pub fn run() {
             enrol_window::window::enrol_submit,
             enrol_window::window::enrol_cancel
         ])
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
-        ))
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -128,7 +125,6 @@ pub fn run() {
                 quit_app(&signalled);
             });
 
-            let handle = app.handle().clone();
             let start_log = app_log.clone();
             let keychain = Arc::new(keychain);
             let worker_secrets = keychain.clone();
@@ -155,12 +151,7 @@ pub fn run() {
                 };
                 match runtime::start(config, proxy_secrets, board.clone(), activity).await {
                     Ok(running) => {
-                        apply_autostart(
-                            &handle,
-                            &paths,
-                            running.settings().start_at_login,
-                            &start_log,
-                        );
+                        apply_autostart(&paths, running.settings().start_at_login, &start_log);
                         *startup = Some(running);
                     }
                     Err(error) => start_log.write(&error.to_string()),
@@ -212,17 +203,18 @@ fn quit_app(app: &AppHandle) {
 }
 
 /// A development build would register a login item that points into the build directory.
-fn apply_autostart(app: &AppHandle, paths: &AppPaths, start_at_login: bool, log: &LogFile) {
+fn apply_autostart(paths: &AppPaths, start_at_login: bool, log: &LogFile) {
     // The login item starts the app without the root variable, so a moved root must not touch it.
     if cfg!(debug_assertions) || AppPaths::default_root().as_deref() != Some(paths.root()) {
         return;
     }
-    use tauri_plugin_autostart::ManagerExt;
-    let launcher = app.autolaunch();
+    let Some(dir) = login_item::launch_agents_dir() else {
+        return;
+    };
     let result = if start_at_login {
-        launcher.enable()
+        std::env::current_exe().and_then(|executable| login_item::enable(&dir, &executable))
     } else {
-        launcher.disable()
+        login_item::disable(&dir)
     };
     if let Err(error) = result {
         log.write(&format!("cannot update the login item: {error}"));

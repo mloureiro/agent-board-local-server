@@ -102,7 +102,16 @@ export function findByName(pids: number[], name: string): number[] {
     .map((match) => Number(match[1]));
 }
 
-function alive(pid: number): boolean {
+export function findByCommand(pids: number[], pattern: RegExp): number[] {
+  const listing = spawnSync('ps', ['-ww', '-o', 'pid=,command=', '-p', pids.join(',')], { encoding: 'utf8' }).stdout;
+  return listing
+    .split('\n')
+    .map((line) => line.trim().match(/^(\d+)\s+(.+)$/))
+    .filter((match): match is RegExpMatchArray => match !== null && pattern.test(match[2] as string))
+    .map((match) => Number(match[1]));
+}
+
+export function alive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -124,6 +133,8 @@ export interface Runner {
   userName: string;
   output: () => string;
   tree: () => number[];
+  /** SIGKILLs the runner alone and resolves with the pids of its tree taken just before, so its children are orphaned. */
+  kill: () => Promise<number[]>;
   stop: () => Promise<void>;
 }
 
@@ -157,7 +168,13 @@ export function scratchDir(prefix: string): string {
 }
 
 export async function startRunner(
-  options: { appRoot?: string; upstreamPort?: number; enrolFromStdin?: boolean; coreDir?: string } = {},
+  options: {
+    appRoot?: string;
+    upstreamPort?: number;
+    enrolFromStdin?: boolean;
+    coreDir?: string;
+    worker?: boolean;
+  } = {},
 ): Promise<Runner> {
   buildRunner();
   const appRoot = options.appRoot ?? scratchDir('abls-smoke-');
@@ -167,6 +184,7 @@ export async function startRunner(
 
   if (options.coreDir !== undefined) args.push('--core', options.coreDir);
   if (options.enrolFromStdin === true) args.push('--enrol-from-stdin');
+  if (options.worker === true) args.push('--worker');
   const child = spawn(runnerBinary, args, { stdio: ['pipe', 'pipe', 'pipe'] });
   if (options.enrolFromStdin !== true) child.stdin.end();
   running.add(child);
@@ -221,6 +239,13 @@ export async function startRunner(
     userName,
     output: () => output,
     tree: () => processTree(child.pid as number),
+    kill: async () => {
+      const members = processTree(child.pid as number);
+      child.kill('SIGKILL');
+      await exited;
+      running.delete(child);
+      return members;
+    },
     stop: async () => {
       const members = processTree(child.pid as number);
       child.kill('SIGTERM');

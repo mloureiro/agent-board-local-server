@@ -4,7 +4,17 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { killStrays, repoRoot, requireStagedCore, startRunner, tearDown, type Runner } from './harness.ts';
+import {
+  alive,
+  findByCommand,
+  findByName,
+  killStrays,
+  repoRoot,
+  requireStagedCore,
+  startRunner,
+  tearDown,
+  type Runner,
+} from './harness.ts';
 
 interface Shared {
   generateDataKey: () => Uint8Array;
@@ -143,6 +153,9 @@ describe('worker enrolment against the built board', () => {
     expect(enrolled.status).toBe(0);
     expect(enrolled.stdout).toContain(`AGENT_BOARD_TOKEN=${issuedTokens[1]}`);
     expect(enrolled.stdout).not.toContain('pending-marker');
+
+    for (const account of ['worker-token-pending', 'worker-data-key-pending'])
+      spawnSync('security', ['delete-generic-password', '-s', service, '-a', account], { stdio: 'ignore' });
   });
 
   it("shows the board's refusal on the worker line at the next dispatch tick", async () => {
@@ -172,4 +185,21 @@ describe('worker enrolment against the built board', () => {
     expect(logs).not.toMatch(/[0-9a-f]{64}/);
     expect(logs).not.toMatch(/proxy-secret|Board-Proxy-Secret|Remote-User|Remote-Groups|authorization/i);
   });
+
+  it('sweeps the backend and the worker processes a killed runner left behind when the same root starts again', async () => {
+    const before = runner.tree();
+    const backend = findByName(before, 'board-server');
+    const worker = findByCommand(before, /internal (listen|watch)/);
+    expect(backend).toHaveLength(1);
+    expect(worker).toHaveLength(2);
+    const orphans = [...backend, ...worker];
+
+    await runner.kill();
+
+    expect(orphans.filter((pid) => !alive(pid))).toEqual([]);
+
+    runner = await startRunner({ appRoot: runner.appRoot, worker: true });
+
+    expect(orphans.filter(alive)).toEqual([]);
+  }, 300_000);
 });

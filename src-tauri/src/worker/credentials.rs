@@ -6,8 +6,8 @@ use crate::secrets::{SecretError, SecretStore};
 
 pub const TOKEN_ACCOUNT: &str = "worker-token";
 pub const DATA_KEY_ACCOUNT: &str = "worker-data-key";
-const PENDING_TOKEN_ACCOUNT: &str = "worker-token-pending";
-const PENDING_DATA_KEY_ACCOUNT: &str = "worker-data-key-pending";
+pub const PENDING_TOKEN_ACCOUNT: &str = "worker-token-pending";
+pub const PENDING_DATA_KEY_ACCOUNT: &str = "worker-data-key-pending";
 
 const TOKEN_NAME: &str = "AGENT_BOARD_TOKEN";
 const DATA_KEY_NAME: &str = "AGENT_BOARD_DATA_KEY";

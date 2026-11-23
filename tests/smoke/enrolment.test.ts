@@ -35,6 +35,22 @@ describe('worker enrolment against the built board', () => {
     return token;
   };
 
+  const credentialsLink = (name: string) =>
+    spawnSync(join(runner.appRoot, 'worker', name), [], {
+      encoding: 'utf8',
+      timeout: 30_000,
+      env: { ...process.env, AGENT_BOARD_CONFIG_DIR: join(runner.appRoot, 'worker/config') },
+    });
+
+  const keychainHas = (account: string) =>
+    spawnSync('security', [
+      'find-generic-password',
+      '-s',
+      `dev.mloureiro.agent-board-local-server.headless:${runner.appRoot}`,
+      '-a',
+      account,
+    ]).status === 0;
+
   const machineInConfig = (): unknown =>
     (JSON.parse(readFileSync(join(runner.appRoot, 'worker/config/config.json'), 'utf8')) as { machine: unknown })
       .machine;
@@ -92,6 +108,13 @@ describe('worker enrolment against the built board', () => {
 
   it("refuses a wrong token with the board's reason and writes nothing", async () => {
     const before = readFileSync(join(runner.appRoot, 'worker/config/web.json'), 'utf8');
+    let treeBefore = runner.tree();
+    for (let settled = false; !settled;) {
+      await new Promise((done) => setTimeout(done, 2_000));
+      const now = runner.tree();
+      settled = now.join() === treeBefore.join();
+      treeBefore = now;
+    }
 
     runner.writeLine('abm_this-token-was-never-issued-by-this-board');
     runner.writeLine(dataKeyLine);
@@ -102,7 +125,25 @@ describe('worker enrolment against the built board', () => {
     expect(failed[1]).not.toContain('never-issued');
     expect(readFileSync(join(runner.appRoot, 'worker/config/web.json'), 'utf8')).toBe(before);
     expect(machineInConfig()).toBe('tnk_two');
+    expect(runner.tree().filter((pid) => treeBefore.includes(pid))).toEqual(treeBefore);
+    expect(keychainHas('worker-token-pending')).toBe(false);
+    expect(keychainHas('worker-data-key-pending')).toBe(false);
+    expect(credentialsLink('worker-credentials-pending').status).not.toBe(0);
   }, 180_000);
+
+  it('never serves a pending pair through the link the running worker uses', () => {
+    const service = `dev.mloureiro.agent-board-local-server.headless:${runner.appRoot}`;
+    const plant = (account: string, value: string) =>
+      spawnSync('security', ['add-generic-password', '-U', '-A', '-s', service, '-a', account, '-w', value]);
+    expect(plant('worker-token-pending', 'abm_pending-marker').status).toBe(0);
+    expect(plant('worker-data-key-pending', 'abk1_pending-marker').status).toBe(0);
+
+    const enrolled = credentialsLink('worker-credentials');
+
+    expect(enrolled.status).toBe(0);
+    expect(enrolled.stdout).toContain(`AGENT_BOARD_TOKEN=${issuedTokens[1]}`);
+    expect(enrolled.stdout).not.toContain('pending-marker');
+  });
 
   it("shows the board's refusal on the worker line at the next dispatch tick", async () => {
     const configPath = join(runner.appRoot, 'worker/config/config.json');

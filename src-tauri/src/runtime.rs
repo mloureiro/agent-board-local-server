@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::activity::{Activity, Guard, Kind};
 use crate::applog::LogFile;
 use crate::backend::{self, Healthz};
 use crate::paths::{AppPaths, Resources, Sidecars};
@@ -17,9 +18,11 @@ use crate::supervisor::orphans;
 use crate::supervisor::process::stop_requested;
 use crate::supervisor::table::{changed_labels, BACKEND, PROXY, WORKER, WORKER_LISTEN};
 use crate::supervisor::{
-    supervise, Control, Launcher, ProcessSpec, RunningProcess, Spawned, Status, StatusBoard,
+    supervise, Command, Control, Launcher, ProcessSpec, RunningProcess, Spawned, Status,
+    StatusBoard,
 };
-use crate::worker::control::Enrolled;
+use crate::worker::check::summary;
+use crate::worker::control::{ActionError, Enrolled};
 use crate::worker::enrol::EnrolError;
 use crate::worker::processes::WorkerSetup;
 use crate::worker::{env as worker_env, WorkerControl};
@@ -74,6 +77,9 @@ pub struct Handle {
     backend_task: JoinHandle<()>,
     worker: Option<Arc<WorkerControl>>,
     settings: Settings,
+    proxy_setup: ProxySetup,
+    board: Arc<StatusBoard>,
+    activity: Arc<Activity>,
 }
 
 impl Handle {
@@ -92,6 +98,24 @@ impl Handle {
         }
     }
 
+    pub async fn restart_server(&mut self) -> Result<(), ActionError> {
+        let _gate = begin(&self.activity, Kind::Recovery)?;
+        self.backend
+            .commands
+            .send(Command::Restart)
+            .await
+            .map_err(|_| ActionError::Failed("this run has no backend to restart".into()))?;
+        let proxy = self.board.get(PROXY);
+        if proxy_needs_restart(proxy.as_ref(), self.proxy_task.is_finished()) {
+            self.proxy_task = tokio::spawn(serve_proxy(
+                self.proxy_setup.clone(),
+                self.board.clone(),
+                self.stop_proxy.subscribe(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Stops in reverse order of the start, so that the runs can report as paused while the board is still up:
     /// worker, proxy, backend. Returns once all of it has stopped.
     pub async fn stop(self) {
@@ -106,17 +130,51 @@ impl Handle {
     }
 }
 
-pub async fn check_worker(running: &Running, board: &StatusBoard) -> Option<PathBuf> {
-    let worker = running.lock().await.as_ref()?.worker()?;
-    let problems = worker.check().await;
-    board.set(WORKER, Status::Note(format!("check: {problems} problems")));
-    Some(worker.check_log())
+fn begin(activity: &Arc<Activity>, kind: Kind) -> Result<Guard, ActionError> {
+    activity.begin(kind).map_err(ActionError::Busy)
+}
+
+async fn worker_of(running: &Running) -> Result<Arc<WorkerControl>, ActionError> {
+    let guard = running.lock().await;
+    match guard.as_ref() {
+        Some(handle) => handle
+            .worker()
+            .ok_or_else(|| ActionError::Failed("this run has no worker".into())),
+        None => Err(ActionError::Failed("the app is not running".into())),
+    }
+}
+
+pub async fn restart_server(running: &Running) -> Result<(), ActionError> {
+    match running.lock().await.as_mut() {
+        Some(handle) => handle.restart_server().await,
+        None => Err(ActionError::Failed("the app is not running".into())),
+    }
+}
+
+pub async fn restart_worker(running: &Running) -> Result<(), ActionError> {
+    worker_of(running).await?.restart().await
+}
+
+pub async fn disconnect_worker(running: &Running) -> Result<(), ActionError> {
+    worker_of(running).await?.disconnect().await
+}
+
+pub async fn check_worker(running: &Running, board: &StatusBoard) -> Result<PathBuf, ActionError> {
+    let worker = worker_of(running).await?;
+    let problems = worker.check().await?;
+    board.set(WORKER, Status::Note(summary(problems)));
+    Ok(worker.check_log())
+}
+
+fn proxy_needs_restart(row: Option<&Status>, task_finished: bool) -> bool {
+    task_finished && !matches!(row, Some(Status::Running { .. }))
 }
 
 pub async fn start(
     config: Config,
     secrets: Arc<dyn SecretStore>,
     board: Arc<StatusBoard>,
+    activity: Arc<Activity>,
 ) -> Result<Handle, StartError> {
     let blocked = |error: StartError| {
         board.set(
@@ -147,22 +205,25 @@ pub async fn start(
     ));
 
     let worker = match (&config.worker, config.upstream_override) {
-        (Some(worker), None) => prepare_worker(&config, worker, &settings.worker_path, &board),
+        (Some(worker), None) => {
+            prepare_worker(&config, worker, &settings.worker_path, &board, &activity)
+        }
         _ => None,
     };
 
     let (stop_worker, worker_stopped) = watch::channel(false);
     let (stop_proxy, proxy_stopped) = watch::channel(false);
     let (backend, backend_stopped, backend_commands) = Control::new();
+    let proxy_setup = ProxySetup {
+        port: settings.port,
+        user_name: settings.user_name.clone(),
+        secret: secret.clone(),
+        frontend: config.resources.frontend(),
+        log: LogFile::new(config.paths.log_file(PROXY)),
+        upstream_override: config.upstream_override,
+    };
     let proxy_task = tokio::spawn(serve_proxy(
-        ProxySetup {
-            port: settings.port,
-            user_name: settings.user_name.clone(),
-            secret: secret.clone(),
-            frontend: config.resources.frontend(),
-            log: LogFile::new(config.paths.log_file(PROXY)),
-            upstream_override: config.upstream_override,
-        },
+        proxy_setup.clone(),
         board.clone(),
         proxy_stopped,
     ));
@@ -183,7 +244,7 @@ pub async fn start(
                 port: None,
             },
             Some(Healthz),
-            board,
+            board.clone(),
             log,
             backend_stopped,
             backend_commands,
@@ -200,6 +261,9 @@ pub async fn start(
         backend_task,
         worker,
         settings,
+        proxy_setup,
+        board,
+        activity,
     })
 }
 
@@ -208,6 +272,7 @@ fn prepare_worker(
     worker: &WorkerConfig,
     worker_path: &[PathBuf],
     board: &Arc<StatusBoard>,
+    activity: &Arc<Activity>,
 ) -> Option<Arc<WorkerControl>> {
     let setup = WorkerSetup {
         paths: config.paths.clone(),
@@ -224,6 +289,7 @@ fn prepare_worker(
         setup,
         worker.secrets.clone(),
         board.clone(),
+        activity.clone(),
     ));
     match control.prepare(&config.sidecars.board, &worker.app_executable) {
         Ok(()) => Some(control),
@@ -277,6 +343,7 @@ async fn log_status_changes(
     }
 }
 
+#[derive(Clone)]
 struct ProxySetup {
     port: u16,
     user_name: String,
@@ -356,5 +423,27 @@ impl Launcher for BackendLauncher {
         RunningProcess::spawn(&spec, &self.config.paths)
             .map(|process| Spawned::new(process, Status::Running { port }))
             .map_err(|error| format!("cannot start: {error}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_proxy_is_started_again_only_when_its_task_ended_without_it_running() {
+        let blocked = Status::Blocked {
+            reason: "port in use".into(),
+        };
+
+        assert!(proxy_needs_restart(Some(&blocked), true));
+        assert!(proxy_needs_restart(Some(&Status::Stopped), true));
+        assert!(proxy_needs_restart(None, true));
+        assert!(!proxy_needs_restart(
+            Some(&Status::Running { port: 4785 }),
+            true
+        ));
+        assert!(!proxy_needs_restart(Some(&blocked), false));
+        assert!(!proxy_needs_restart(None, false));
     }
 }

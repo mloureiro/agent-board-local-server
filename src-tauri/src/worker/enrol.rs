@@ -8,12 +8,13 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use super::credentials::{discard_pending, promote_pending, write_pending, Credentials};
+use super::credentials::{discard_pending, write_pending, Credentials, Pair};
 use super::machine;
 use crate::secrets::{SecretError, SecretStore};
 
 const INIT_LIMIT: Duration = Duration::from_secs(60);
 const MESSAGE_LIMIT: usize = 400;
+const CREDENTIALS_COMMAND: &str = "AGENT_BOARD_CREDENTIALS_COMMAND";
 
 #[derive(Debug)]
 pub struct EnrolError(String);
@@ -44,12 +45,17 @@ pub struct InitReport {
 }
 
 pub trait InitRunner: Send + Sync {
-    fn run_init(&self, url: &str) -> impl Future<Output = Result<InitReport, String>> + Send;
+    fn run_init(
+        &self,
+        url: &str,
+        pair: Pair,
+    ) -> impl Future<Output = Result<InitReport, String>> + Send;
 }
 
 pub struct BoardInit {
     pub board: PathBuf,
     pub env: BTreeMap<String, String>,
+    pub pending_credentials: PathBuf,
 }
 
 impl BoardInit {
@@ -59,11 +65,22 @@ impl BoardInit {
             .map(|dir| PathBuf::from(dir).join("config.json"))
     }
 
-    async fn run_board_init(&self, url: &str) -> Result<(), String> {
+    fn environment(&self, pair: Pair) -> BTreeMap<String, String> {
+        let mut env = self.env.clone();
+        if pair == Pair::Pending {
+            env.insert(
+                CREDENTIALS_COMMAND.to_owned(),
+                self.pending_credentials.to_string_lossy().into_owned(),
+            );
+        }
+        env
+    }
+
+    async fn run_board_init(&self, url: &str, pair: Pair) -> Result<(), String> {
         let run = Command::new(&self.board)
             .args(["init", "--url", url, "--force"])
             .env_clear()
-            .envs(&self.env)
+            .envs(self.environment(pair))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -86,8 +103,8 @@ impl BoardInit {
 }
 
 impl InitRunner for BoardInit {
-    async fn run_init(&self, url: &str) -> Result<InitReport, String> {
-        self.run_board_init(url).await?;
+    async fn run_init(&self, url: &str, pair: Pair) -> Result<InitReport, String> {
+        self.run_board_init(url, pair).await?;
         Ok(InitReport {
             machine: self.config_path().and_then(|path| machine::read(&path)),
         })
@@ -167,7 +184,9 @@ fn looks_like_secret(word: &str) -> bool {
     })
 }
 
-pub async fn enrol<R: InitRunner>(
+/// Checks a pair with the board through the pending link. An accepted pair stays pending, so the caller promotes
+/// it after stopping the running worker; a refused one is discarded.
+pub async fn validate<R: InitRunner>(
     store: &dyn SecretStore,
     runner: &R,
     url: &str,
@@ -186,11 +205,8 @@ pub async fn enrol<R: InitRunner>(
 
     discard_pending(store)?;
     write_pending(store, &credentials)?;
-    match runner.run_init(url).await {
-        Ok(report) => match promote_pending(store) {
-            Ok(()) => Ok(report),
-            Err(error) => Err(with_cleanup(EnrolError::from(error), store)),
-        },
+    match runner.run_init(url, Pair::Pending).await {
+        Ok(report) => Ok(report),
         Err(message) => Err(with_cleanup(
             EnrolError::new(scrub(
                 &message,
@@ -216,7 +232,9 @@ mod tests {
 
     use crate::secrets::testing::DeletesFailWhenArmed;
     use crate::secrets::MemoryStore;
-    use crate::worker::credentials::{helper_output, TOKEN_ACCOUNT};
+    use crate::worker::credentials::{
+        helper_output, promote_pending, DATA_KEY_ACCOUNT, TOKEN_ACCOUNT,
+    };
 
     use super::*;
 
@@ -227,8 +245,9 @@ mod tests {
     }
 
     impl InitRunner for FakeInit {
-        async fn run_init(&self, _url: &str) -> Result<InitReport, String> {
-            *self.seen_by_helper.lock().unwrap() = helper_output(self.store.as_ref()).ok();
+        async fn run_init(&self, _url: &str, pair: Pair) -> Result<InitReport, String> {
+            assert_eq!(pair, Pair::Pending);
+            *self.seen_by_helper.lock().unwrap() = helper_output(self.store.as_ref(), pair).ok();
             self.outcome.clone()
         }
     }
@@ -245,15 +264,13 @@ mod tests {
     async fn a_refused_init_discards_the_pending_credentials_and_keeps_the_working_ones() {
         let store = std::sync::Arc::new(MemoryStore::default());
         store.set(TOKEN_ACCOUNT, "abm_old").unwrap();
-        store
-            .set(crate::worker::credentials::DATA_KEY_ACCOUNT, "abk1_old")
-            .unwrap();
+        store.set(DATA_KEY_ACCOUNT, "abk1_old").unwrap();
         let runner = fake(
             Err("the token: a machine token starts with abm_ (abm_pasted-wrong)".into()),
             &store,
         );
 
-        let error = enrol(
+        let error = validate(
             store.as_ref(),
             &runner,
             "http://127.0.0.1:4785",
@@ -272,15 +289,16 @@ mod tests {
         assert!(!error.to_string().contains("pasted-wrong"));
         assert!(error.to_string().contains("(withheld)"));
         assert_eq!(
-            helper_output(store.as_ref()).unwrap(),
+            helper_output(store.as_ref(), Pair::Enrolled).unwrap(),
             "AGENT_BOARD_TOKEN=abm_old\nAGENT_BOARD_DATA_KEY=abk1_old\n"
         );
+        assert!(!crate::worker::credentials::pending_present(store.as_ref()).unwrap());
     }
 
     struct ArmsTheStore(std::sync::Arc<DeletesFailWhenArmed>);
 
     impl InitRunner for ArmsTheStore {
-        async fn run_init(&self, _url: &str) -> Result<InitReport, String> {
+        async fn run_init(&self, _url: &str, _pair: Pair) -> Result<InitReport, String> {
             self.0.arm();
             Err("refused".into())
         }
@@ -290,7 +308,7 @@ mod tests {
     async fn a_refused_pair_that_cannot_be_removed_is_reported_and_still_visible_as_pending() {
         let store = std::sync::Arc::new(DeletesFailWhenArmed::default());
 
-        let error = enrol(
+        let error = validate(
             store.as_ref(),
             &ArmsTheStore(store.clone()),
             "http://127.0.0.1:4785",
@@ -306,11 +324,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_accepted_init_promotes_the_credentials_without_the_pasted_name_prefix() {
+    async fn an_accepted_init_keeps_the_pair_pending_without_the_pasted_name_prefix() {
         let store = std::sync::Arc::new(MemoryStore::default());
         let runner = fake(Ok(InitReport::default()), &store);
 
-        enrol(
+        validate(
             store.as_ref(),
             &runner,
             "http://127.0.0.1:4785",
@@ -320,13 +338,17 @@ mod tests {
         .await
         .unwrap();
 
+        let pending = "AGENT_BOARD_TOKEN=abm_fresh\nAGENT_BOARD_DATA_KEY=abk1_fresh\n";
         assert_eq!(
-            helper_output(store.as_ref()).unwrap(),
-            "AGENT_BOARD_TOKEN=abm_fresh\nAGENT_BOARD_DATA_KEY=abk1_fresh\n"
+            helper_output(store.as_ref(), Pair::Pending).unwrap(),
+            pending
         );
+        assert_eq!(store.get(TOKEN_ACCOUNT).unwrap(), None);
+
+        promote_pending(store.as_ref()).unwrap();
         assert_eq!(
-            store.get(TOKEN_ACCOUNT).unwrap().as_deref(),
-            Some("abm_fresh")
+            helper_output(store.as_ref(), Pair::Enrolled).unwrap(),
+            pending
         );
     }
 
@@ -335,7 +357,7 @@ mod tests {
         let store = std::sync::Arc::new(MemoryStore::default());
         let runner = fake(Ok(InitReport::default()), &store);
 
-        let error = enrol(
+        let error = validate(
             store.as_ref(),
             &runner,
             "http://127.0.0.1:4785",
@@ -348,7 +370,7 @@ mod tests {
         assert!(error.to_string().contains("one line"));
         assert!(runner.seen_by_helper.lock().unwrap().is_none());
         assert!(matches!(
-            helper_output(store.as_ref()),
+            helper_output(store.as_ref(), Pair::Enrolled),
             Err(crate::worker::credentials::HelperError::NotEnrolled)
         ));
     }

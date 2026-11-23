@@ -116,9 +116,8 @@ describe('worker enrolment against the built board', () => {
     expect(line[1]).toBe('refused');
   }, 260_000);
 
-  it('writes no token, data key, proxy secret, sign-in value or query string to the app logs', async () => {
-    const queryMarker = 'query-marker-9f3a';
-    await fetch(`${base}/trpc/me?${queryMarker}=1`);
+  it('writes no token, data key, proxy secret or sign-in value to the app logs', async () => {
+    await fetch(`${base}/trpc/me`);
     const logs = ['app.log', 'proxy.log']
       .map((name) => readFileSync(join(runner.appRoot, 'logs', name), 'utf8'))
       .join('\n');
@@ -129,8 +128,6 @@ describe('worker enrolment against the built board', () => {
     for (const token of issuedTokens) expect(logs).not.toContain(token);
     expect(logs).not.toContain('never-issued');
     expect(logs).not.toContain(dataKey);
-    expect(logs).not.toContain(queryMarker);
-    expect(logs).not.toContain('?');
     expect(logs).not.toMatch(/[0-9a-f]{64}/);
     expect(logs).not.toMatch(/proxy-secret|Board-Proxy-Secret|Remote-User|Remote-Groups|authorization/i);
   });

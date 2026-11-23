@@ -1,3 +1,4 @@
+use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -5,13 +6,14 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 use super::check;
-use super::credentials::{discard_pending, enrolled, pending_present};
-use super::enrol::{enrol, BoardInit, EnrolError, InitReport, InitRunner};
+use super::credentials::{discard_pending, enrolled, forget, promote_pending, Pair};
+use super::enrol::{validate, BoardInit, EnrolError, InitReport, InitRunner};
 use super::layout;
 use super::processes::{Processes, WorkerSetup};
 use super::shutdown::{kill_stragglers, pause_runs};
-use crate::secrets::SecretStore;
-use crate::supervisor::table::{PROXY, WORKER_LISTEN};
+use crate::activity::{Activity, Guard, Kind};
+use crate::secrets::{SecretError, SecretStore};
+use crate::supervisor::table::{PROXY, WORKER, WORKER_LISTEN};
 use crate::supervisor::{Status, StatusBoard};
 
 const START_PAUSE_GRACE: Duration = Duration::from_secs(5);
@@ -28,6 +30,30 @@ struct State {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Enrolled {
     pub machine: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum ActionError {
+    Busy(Kind),
+    Failed(String),
+}
+
+impl fmt::Display for ActionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Busy(Kind::Quit) => f.write_str("the app is quitting"),
+            Self::Busy(kind) => write!(f, "{kind} is running"),
+            Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ActionError {}
+
+impl From<SecretError> for ActionError {
+    fn from(error: SecretError) -> Self {
+        Self::Failed(error.to_string())
+    }
 }
 
 pub trait Host: Send + Sync {
@@ -78,21 +104,28 @@ pub struct WorkerControl<H = ProcessHost, I = BoardInit> {
     secrets: Arc<dyn SecretStore>,
     board: Arc<StatusBoard>,
     init: I,
+    activity: Arc<Activity>,
     state: Mutex<State>,
 }
 
 impl WorkerControl {
-    pub fn new(setup: WorkerSetup, secrets: Arc<dyn SecretStore>, board: Arc<StatusBoard>) -> Self {
+    pub fn new(
+        setup: WorkerSetup,
+        secrets: Arc<dyn SecretStore>,
+        board: Arc<StatusBoard>,
+        activity: Arc<Activity>,
+    ) -> Self {
         let init = BoardInit {
             board: setup.board.clone(),
             env: setup.env.clone(),
+            pending_credentials: setup.paths.worker_credentials_pending(),
         };
         let setup = Arc::new(setup);
         let host = ProcessHost {
             processes: Processes::new(setup.clone(), board.clone()),
             setup,
         };
-        Self::with_parts(host, init, secrets, board)
+        Self::with_parts(host, init, secrets, board, activity)
     }
 
     pub fn prepare(
@@ -109,9 +142,10 @@ impl WorkerControl {
         self.host.setup.paths.log_file("worker-check")
     }
 
-    pub async fn check(&self) -> usize {
+    pub async fn check(&self) -> Result<usize, ActionError> {
+        let _gate = self.begin(Kind::Recovery)?;
         let setup = &self.host.setup;
-        check::run(&setup.board, &setup.env, &self.check_log()).await
+        Ok(check::run(&setup.board, &setup.env, &self.check_log()).await)
     }
 }
 
@@ -121,14 +155,20 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
         init: I,
         secrets: Arc<dyn SecretStore>,
         board: Arc<StatusBoard>,
+        activity: Arc<Activity>,
     ) -> Self {
         Self {
             host,
             secrets,
             board,
             init,
+            activity,
             state: Mutex::default(),
         }
+    }
+
+    fn begin(&self, kind: Kind) -> Result<Guard, ActionError> {
+        self.activity.begin(kind).map_err(ActionError::Busy)
     }
 
     fn blocked(&self, reason: String) {
@@ -160,7 +200,7 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
     async fn connect(&self, state: &mut State, url: &str) {
         self.host.pause_runs(START_PAUSE_GRACE).await;
         if !self.host.web_json_names(url) {
-            if let Err(message) = self.init.run_init(url).await {
+            if let Err(message) = self.init.run_init(url, Pair::Enrolled).await {
                 return self.blocked(format!("board init: {message}"));
             }
         }
@@ -170,6 +210,9 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
     }
 
     pub async fn enrol(&self, token: &str, data_key: &str) -> Result<Enrolled, EnrolError> {
+        let _gate = self
+            .begin(Kind::Enrolment)
+            .map_err(|error| EnrolError::new(error.to_string()))?;
         let mut state = self.state.lock().await;
         if state.stopping {
             return Err(EnrolError::new("the app is quitting"));
@@ -177,33 +220,65 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
         let Some(url) = self.proxy_url() else {
             return Err(EnrolError::new("the board is not running yet"));
         };
-        let was_started = state.started;
-        if was_started {
+        let InitReport { machine } =
+            validate(self.secrets.as_ref(), &self.init, &url, token, data_key).await?;
+        if state.started {
             self.host.stop_processes().await;
             state.started = false;
-            self.host.pause_runs(START_PAUSE_GRACE).await;
         }
-        let outcome = enrol(self.secrets.as_ref(), &self.init, &url, token, data_key).await;
-        match outcome {
-            Ok(InitReport { machine }) => {
-                self.connect(&mut state, &url).await;
-                Ok(Enrolled { machine })
-            }
-            Err(error) => {
-                if was_started {
-                    self.resume_with_enrolled_pair(&mut state, &url).await;
-                }
-                Err(error)
-            }
+        self.host.pause_runs(START_PAUSE_GRACE).await;
+        if let Err(error) = promote_pending(self.secrets.as_ref()) {
+            let _ = discard_pending(self.secrets.as_ref());
+            self.blocked(error.to_string());
+            return Err(error.into());
         }
+        self.host.start_processes().await;
+        state.started = true;
+        state.runs_possible = true;
+        Ok(Enrolled { machine })
     }
 
-    async fn resume_with_enrolled_pair(&self, state: &mut State, url: &str) {
-        match pending_present(self.secrets.as_ref()) {
-            Ok(false) => self.connect(state, url).await,
-            Ok(true) => self.blocked("a refused credential pair is still in the Keychain".into()),
-            Err(error) => self.blocked(error.to_string()),
+    pub async fn restart(&self) -> Result<(), ActionError> {
+        let _gate = self.begin(Kind::Recovery)?;
+        let mut state = self.state.lock().await;
+        if state.stopping {
+            return Err(ActionError::Failed("the app is quitting".into()));
         }
+        if state.started {
+            self.host.stop_processes().await;
+            self.host.start_processes().await;
+            return Ok(());
+        }
+        if !enrolled(self.secrets.as_ref())? {
+            return Err(ActionError::Failed("the worker is not connected".into()));
+        }
+        let Some(url) = self.proxy_url() else {
+            return Err(ActionError::Failed("the board is not running yet".into()));
+        };
+        self.connect(&mut state, &url).await;
+        Ok(())
+    }
+
+    pub async fn disconnect(&self) -> Result<(), ActionError> {
+        let _gate = self.begin(Kind::Recovery)?;
+        let mut state = self.state.lock().await;
+        if state.stopping {
+            return Err(ActionError::Failed("the app is quitting".into()));
+        }
+        self.host.stop_processes().await;
+        state.started = false;
+        if state.runs_possible {
+            self.host.pause_runs(QUIT_PAUSE_GRACE).await;
+            state.runs_possible = false;
+        }
+        let forgotten = forget(self.secrets.as_ref()).and(discard_pending(self.secrets.as_ref()));
+        if let Err(error) = forgotten {
+            self.blocked(error.to_string());
+            return Err(error.into());
+        }
+        self.board.set(WORKER_LISTEN, Status::NotConnected);
+        self.board.set(WORKER, Status::Stopped);
+        Ok(())
     }
 
     pub async fn stop(&self) {
@@ -225,9 +300,8 @@ mod tests {
     use std::time::Duration;
 
     use crate::paths::AppPaths;
-    use crate::secrets::testing::DeletesFailWhenArmed;
     use crate::secrets::MemoryStore;
-    use crate::worker::credentials::{DATA_KEY_ACCOUNT, TOKEN_ACCOUNT};
+    use crate::worker::credentials::{pending_present, DATA_KEY_ACCOUNT, TOKEN_ACCOUNT};
 
     use super::*;
 
@@ -263,27 +337,24 @@ mod tests {
     enum Init {
         Accepts,
         Refuses,
-        RefusesAndLocksTheStore(Arc<DeletesFailWhenArmed>),
         Hangs,
     }
 
     struct FakeInit {
         events: Events,
+        pairs: Arc<StdMutex<Vec<Pair>>>,
         behaviour: Init,
     }
 
     impl InitRunner for FakeInit {
-        async fn run_init(&self, _url: &str) -> Result<InitReport, String> {
+        async fn run_init(&self, _url: &str, pair: Pair) -> Result<InitReport, String> {
             self.events.lock().unwrap().push("init");
+            self.pairs.lock().unwrap().push(pair);
             match &self.behaviour {
                 Init::Accepts => Ok(InitReport {
                     machine: Some("tnk_one".into()),
                 }),
                 Init::Refuses => Err("refused".into()),
-                Init::RefusesAndLocksTheStore(store) => {
-                    store.arm();
-                    Err("refused".into())
-                }
                 Init::Hangs => std::future::pending().await,
             }
         }
@@ -292,7 +363,10 @@ mod tests {
     struct Rig {
         control: WorkerControl<FakeHost, FakeInit>,
         events: Events,
+        pairs: Arc<StdMutex<Vec<Pair>>>,
         board: Arc<StatusBoard>,
+        store: Arc<dyn SecretStore>,
+        activity: Arc<Activity>,
     }
 
     fn rig(behaviour: Init, store: Arc<dyn SecretStore>) -> Rig {
@@ -305,6 +379,8 @@ mod tests {
         web_json_url: &'static str,
     ) -> Rig {
         let events: Events = Arc::default();
+        let pairs = Arc::default();
+        let activity = Arc::new(Activity::default());
         let board = Arc::new(StatusBoard::default());
         board.set(PROXY, Status::Running { port: 4785 });
         let control = WorkerControl::with_parts(
@@ -314,15 +390,20 @@ mod tests {
             },
             FakeInit {
                 events: events.clone(),
+                pairs: Arc::clone(&pairs),
                 behaviour,
             },
-            store,
+            store.clone(),
             board.clone(),
+            activity.clone(),
         );
         Rig {
             control,
             events,
+            pairs,
             board,
+            store,
+            activity,
         }
     }
 
@@ -343,13 +424,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_running_worker_is_stopped_and_its_runs_paused_before_the_new_pair_is_checked() {
+    async fn an_accepted_reconnect_checks_first_then_stops_pauses_and_starts_with_the_new_pair() {
         let rig = rig(Init::Accepts, enrolled_store());
         started(&rig).await;
 
         rig.control.enrol("abm_new", "abk1_new").await.unwrap();
 
-        assert_eq!(seen(&rig), ["stop", "pause", "init", "pause", "start"]);
+        assert_eq!(seen(&rig), ["init", "stop", "pause", "start"]);
+        assert_eq!(*rig.pairs.lock().unwrap(), [Pair::Pending]);
+        assert_eq!(
+            rig.store.get(TOKEN_ACCOUNT).unwrap().as_deref(),
+            Some("abm_new")
+        );
+        assert!(!pending_present(rig.store.as_ref()).unwrap());
     }
 
     #[tokio::test]
@@ -363,40 +450,115 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn after_a_refusal_the_worker_resumes_with_the_enrolled_pair() {
+    async fn a_refused_reconnect_runs_only_the_check_and_leaves_the_worker_and_its_pair_alone() {
         let rig = rig(Init::Refuses, enrolled_store());
         started(&rig).await;
+        let before = rig.board.get(WORKER_LISTEN);
 
         rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
 
-        assert_eq!(seen(&rig), ["stop", "pause", "init", "pause", "start"]);
+        assert_eq!(seen(&rig), ["init"]);
+        assert_eq!(rig.board.get(WORKER_LISTEN), before);
+        assert_eq!(
+            rig.store.get(TOKEN_ACCOUNT).unwrap().as_deref(),
+            Some("abm_old")
+        );
+        assert!(!pending_present(rig.store.as_ref()).unwrap());
     }
 
     #[tokio::test]
-    async fn the_worker_stays_down_while_a_refused_pair_cannot_be_removed() {
-        let store = Arc::new(DeletesFailWhenArmed::default());
-        store.set(TOKEN_ACCOUNT, "abm_old").unwrap();
-        store.set(DATA_KEY_ACCOUNT, "abk1_old").unwrap();
-        let rig = rig(Init::RefusesAndLocksTheStore(store.clone()), store);
-        started(&rig).await;
-
-        rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
-
-        assert_eq!(seen(&rig), ["stop", "pause", "init"]);
-        assert!(matches!(
-            rig.board.get(WORKER_LISTEN),
-            Some(Status::Blocked { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn a_first_enrolment_has_nothing_to_stop_or_pause_before_the_check() {
+    async fn a_first_enrolment_pauses_before_it_starts() {
         let rig = rig(Init::Accepts, Arc::new(MemoryStore::default()));
         rig.control.proxy_ready().await;
 
         rig.control.enrol("abm_new", "abk1_new").await.unwrap();
 
         assert_eq!(seen(&rig), ["init", "pause", "start"]);
+    }
+
+    #[tokio::test]
+    async fn restarting_a_started_worker_stops_and_starts_it_without_pausing_runs() {
+        let rig = rig(Init::Accepts, enrolled_store());
+        started(&rig).await;
+
+        rig.control.restart().await.unwrap();
+
+        assert_eq!(seen(&rig), ["stop", "start"]);
+    }
+
+    #[tokio::test]
+    async fn restarting_a_blocked_worker_with_an_enrolled_pair_goes_through_connect_again() {
+        let rig = rig_with_web_json(Init::Refuses, enrolled_store(), "http://127.0.0.1:4790");
+        rig.control.proxy_ready().await;
+        rig.events.lock().unwrap().clear();
+
+        rig.control.restart().await.unwrap();
+
+        assert_eq!(seen(&rig), ["pause", "init"]);
+        assert_eq!(*rig.pairs.lock().unwrap(), [Pair::Enrolled, Pair::Enrolled]);
+    }
+
+    #[tokio::test]
+    async fn restarting_a_worker_that_was_never_enrolled_changes_nothing() {
+        let rig = rig(Init::Accepts, Arc::new(MemoryStore::default()));
+        rig.control.proxy_ready().await;
+
+        rig.control.restart().await.unwrap_err();
+
+        assert!(seen(&rig).is_empty());
+    }
+
+    #[tokio::test]
+    async fn disconnecting_stops_the_worker_pauses_its_runs_and_forgets_the_pair() {
+        let rig = rig(Init::Accepts, enrolled_store());
+        started(&rig).await;
+
+        rig.control.disconnect().await.unwrap();
+
+        assert_eq!(seen(&rig), ["stop", "pause"]);
+        assert_eq!(rig.store.get(TOKEN_ACCOUNT).unwrap(), None);
+        assert_eq!(rig.store.get(DATA_KEY_ACCOUNT).unwrap(), None);
+        assert_eq!(rig.board.get(WORKER_LISTEN), Some(Status::NotConnected));
+    }
+
+    #[tokio::test]
+    async fn after_a_disconnect_the_next_enrolment_is_a_first_one() {
+        let rig = rig(Init::Accepts, enrolled_store());
+        started(&rig).await;
+        rig.control.disconnect().await.unwrap();
+        rig.events.lock().unwrap().clear();
+
+        rig.control.enrol("abm_new", "abk1_new").await.unwrap();
+
+        assert_eq!(seen(&rig), ["init", "pause", "start"]);
+    }
+
+    #[tokio::test]
+    async fn an_action_is_refused_while_another_activity_holds_the_gate() {
+        let rig = rig(Init::Accepts, enrolled_store());
+        started(&rig).await;
+        let _backup = rig.activity.begin(Kind::Backup).unwrap();
+
+        assert!(matches!(
+            rig.control.restart().await,
+            Err(ActionError::Busy(Kind::Backup))
+        ));
+        assert!(matches!(
+            rig.control.disconnect().await,
+            Err(ActionError::Busy(Kind::Backup))
+        ));
+        assert!(rig.control.enrol("abm_new", "abk1_new").await.is_err());
+        assert!(seen(&rig).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_gate_is_free_again_once_an_action_has_finished() {
+        let rig = rig(Init::Accepts, enrolled_store());
+        started(&rig).await;
+
+        rig.control.restart().await.unwrap();
+
+        assert!(rig.activity.begin(Kind::Backup).is_ok());
     }
 
     #[tokio::test]

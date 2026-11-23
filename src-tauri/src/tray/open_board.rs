@@ -48,9 +48,17 @@ pub async fn open_board(port: u16) -> Opened {
 }
 
 pub async fn open_text(file: &std::path::Path) {
+    open_path(&["-t"], file).await;
+}
+
+pub async fn open_folder(folder: &std::path::Path) {
+    open_path(&[], folder).await;
+}
+
+async fn open_path(flags: &[&str], path: &std::path::Path) {
     let _ = tokio::process::Command::new(OPEN)
-        .arg("-t")
-        .arg(file)
+        .args(flags)
+        .arg(path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

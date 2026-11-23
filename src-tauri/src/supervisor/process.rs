@@ -109,7 +109,6 @@ impl RunningProcess {
     }
 }
 
-/// A running child that shows `status` on the board once it is up.
 pub struct Spawned {
     process: RunningProcess,
     status: Status,

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_board_local_server::activity::Activity;
 use agent_board_local_server::lock::{self, LockError};
 use agent_board_local_server::paths::{AppPaths, Resources, Sidecars, APP_IDENTIFIER};
 use agent_board_local_server::runtime::{self, Config, WorkerConfig};
@@ -155,7 +156,14 @@ async fn main() {
         }
     });
 
-    let handle = match runtime::start(config, Arc::new(MemoryStore::default()), board.clone()).await
+    let activity = Arc::new(Activity::default());
+    let handle = match runtime::start(
+        config,
+        Arc::new(MemoryStore::default()),
+        board.clone(),
+        activity.clone(),
+    )
+    .await
     {
         Ok(handle) => handle,
         Err(error) => {
@@ -187,6 +195,7 @@ async fn main() {
             }
         }
     };
+    activity.quit();
     handle.stop().await;
     println!("stopped");
     std::process::exit(exit_code);

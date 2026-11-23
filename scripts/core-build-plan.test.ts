@@ -4,6 +4,7 @@ import {
   caddyfileCopyError,
   isBuildCurrent,
   missingTools,
+  needsCheckoutRestore,
   parseBuildArgs,
   parsePinnedBun,
   parseCoreBuild,
@@ -33,6 +34,22 @@ describe('isBuildCurrent', () => {
 
   it('rejects a missing manifest', () => {
     expect(isBuildCurrent(null, expected, files)).toBe(false);
+  });
+});
+
+describe('needsCheckoutRestore', () => {
+  it.each([
+    ['the stage is current and the checkout is complete', true, { present: true, hasNodeModules: true }, false],
+    ['the stage is current and the checkout is missing', true, { present: false, hasNodeModules: false }, true],
+    ['the stage is current and node_modules is missing', true, { present: true, hasNodeModules: false }, true],
+    [
+      'the stage is stale, since the full build fetches the checkout anyway',
+      false,
+      { present: false, hasNodeModules: false },
+      false,
+    ],
+  ])('when %s', (_name, stageCurrent, checkout, expected) => {
+    expect(needsCheckoutRestore(stageCurrent, checkout)).toBe(expected);
   });
 });
 

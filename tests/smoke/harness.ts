@@ -1,8 +1,8 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 export const repoRoot = resolve(import.meta.dirname, '../..');
 const tauriDir = join(repoRoot, 'src-tauri');
@@ -31,6 +31,9 @@ export function requireStagedCore(): string {
   }
   if (staged !== commit)
     throw new Error(`The staged core is ${String(staged)}, the pin is ${commit}: run pnpm core:build`);
+  const checkout = join(repoRoot, '.core', commit);
+  if (!existsSync(join(checkout, 'node_modules')))
+    throw new Error(`The core checkout ${checkout} is missing or not installed: run pnpm core:build`);
   return commit;
 }
 
@@ -76,6 +79,16 @@ export function processTree(root: number): number[] {
   return found;
 }
 
+export function findByName(pids: number[], name: string): number[] {
+  const listing = spawnSync('ps', ['-o', 'pid=,comm=', '-p', pids.join(',')], { encoding: 'utf8' }).stdout;
+  return listing
+    .split('\n')
+    .map((line) => line.trim().match(/^(\d+)\s+(.+)$/))
+    .filter((match): match is RegExpMatchArray => match !== null)
+    .filter((match) => basename(match[2] as string).startsWith(name))
+    .map((match) => Number(match[1]));
+}
+
 function alive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -90,6 +103,8 @@ export interface Runner {
   writeLine: (line: string) => void;
   /** Resolves with the first match in what the runner printed so far or prints next; fails after the timeout. */
   waitFor: (pattern: RegExp, timeoutMs: number) => Promise<RegExpMatchArray>;
+  /** Like waitFor, but matches only what the runner prints after this call. */
+  waitForNew: (pattern: RegExp, timeoutMs: number) => Promise<RegExpMatchArray>;
   appRoot: string;
   proxyPort: number;
   backendPort: number | null;
@@ -149,16 +164,18 @@ export async function startRunner(
   child.stdout.on('data', collect);
   child.stderr.on('data', collect);
 
-  const wait = async (pattern: RegExp, timeoutMs: number): Promise<RegExpMatchArray> => {
+  const waitFrom = async (from: number, pattern: RegExp, timeoutMs: number): Promise<RegExpMatchArray> => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const match = output.match(pattern);
+      const match = output.slice(from).match(pattern);
       if (match) return match;
       if (child.exitCode !== null) throw new Error(`The runner exited early:\n${output}`);
       await new Promise((done) => setTimeout(done, 100));
     }
     throw new Error(`Timed out waiting for ${String(pattern)}:\n${output}`);
   };
+
+  const wait = (pattern: RegExp, timeoutMs: number) => waitFrom(0, pattern, timeoutMs);
 
   let backendPort: number | null = null;
   try {
@@ -180,6 +197,7 @@ export async function startRunner(
       child.stdin.write(`${line}\n`);
     },
     waitFor: wait,
+    waitForNew: (pattern, timeoutMs) => waitFrom(output.length, pattern, timeoutMs),
     appRoot,
     proxyPort: port,
     backendPort,

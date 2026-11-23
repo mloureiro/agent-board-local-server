@@ -6,21 +6,23 @@ It packages the agent-board core at the commit named in `core.pin.json` and hold
 
 Today the app starts the backend (PGlite in process, loopback only) as a supervised sidecar, serves the board through its own proxy and, once enrolled, runs the worker. A crashed process is restarted after 1 s, 5 s and 25 s; a fourth crash without a stable run in between leaves it down, and the count goes back to zero after 10 minutes up. A backend that stops answering its health check three times in a row (checked every 60 s) is treated as crashed. The tray shows the state of each process and stops everything on Quit, on SIGTERM, SIGINT and SIGHUP, and on any other exit of the app (the system ending it at log out, for one) that still finds something running.
 
-The app keeps its files under `~/Library/Application Support/dev.mloureiro.agent-board-local-server/`: `settings.json` (`userName`, `dataDir`, `port`, `startAtLogin`, `workerPath`; read at start and never rewritten), `logs/`, `run/`, `worker/` and the data folder. The proxy secret, the machine token and the data key live in the login Keychain and nowhere else. `cargo run --example headless -- --app-root <dir>` runs the same runtime without the tray until SIGTERM.
+The app keeps its files under `~/Library/Application Support/dev.mloureiro.agent-board-local-server/`: `settings.json` (`userName`, `dataDir`, `backupDir`, `port`, `startAtLogin`, `workerPath`; read at start and never rewritten), `logs/`, `run/`, `worker/` and the data folder. The proxy secret, the machine token and the data key live in the login Keychain and nowhere else. `cargo run --example headless -- --app-root <dir>` runs the same runtime without the tray until SIGTERM.
 
 ## On disk, keys and what is stored in plain form
 
 ```
 ~/Library/Application Support/dev.mloureiro.agent-board-local-server/
-  settings.json    userName, dataDir, port, startAtLogin, workerPath (read at start, never rewritten)
+  settings.json    userName, dataDir, backupDir, port, startAtLogin, workerPath (read at start, never rewritten)
   app.lock         one app at a time
   logs/            app.log, proxy.log, backend.log, worker-listen.log, worker-watch.log and dispatch.log, each with one previous generation (.log.1), and worker-check.log (replaced by each check)
   run/             pid files of the supervised processes
   data/pglite/     the database (the default dataDir)
+  data/core-commit the core commit whose migrations last ran on this database
+  backups/         manual-<time>/ and pre-upgrade-<commit>-<time>/, each holding a copy of pglite/ (the default backupDir)
   worker/          config/, state/, run/, bin/board, bin/board-local, worker-credentials, worker-credentials-pending
 ```
 
-Settings keys, all optional: `userName` (default the macOS login name, the board user), `dataDir` (default `data/` under the app folder), `port` (default 4785; it is part of the origin the browser keeps its keys under, so it should not change), `startAtLogin` (default true; the release build registers a login item, a debug build never does), `workerPath` (default empty; a list of absolute directories that go on the worker's `PATH`, see "The worker"). A malformed or out-of-range value stops the app with a message instead of being replaced by a default. A key the build does not know stops it too, so an older build refuses a `settings.json` that holds a key added by a newer one. `settings.json` is read once, at start: after a change, Quit and open the app again.
+Settings keys, all optional: `userName` (default the macOS login name, the board user), `dataDir` (default `data/` under the app folder), `backupDir` (default `backups/` under the app folder; an absolute path, outside an app bundle and not `dataDir` or inside it), `port` (default 4785; it is part of the origin the browser keeps its keys under, so it should not change), `startAtLogin` (default true; the release build registers a login item, a debug build never does), `workerPath` (default empty; a list of absolute directories that go on the worker's `PATH`, see "The worker"). A malformed or out-of-range value stops the app with a message instead of being replaced by a default. A key the build does not know stops it too, so an older build refuses a `settings.json` that holds a key added by a newer one. `settings.json` is read once, at start: after a change, Quit and open the app again.
 
 `AGENT_BOARD_LOCAL_SERVER_ROOT` moves the whole app folder, for running a build beside an installed one. Any root other than the default also gets its own Keychain service and leaves the login item alone.
 
@@ -34,11 +36,29 @@ Settings keys, all optional: `userName` (default the macOS login name, the board
 
 ## The tray
 
-The app has no window and no Dock icon. The menu has "Open board", one line per process, the version line, then "Restart server", "Restart worker", "Disconnect worker", "Check worker", "Open logs folder", "Open settings file (applies after Quit and reopen)", "Connect worker…" and "Quit". "Open board" and "Connect worker…" are enabled once the proxy runs. "Restart worker", "Disconnect worker" and "Check worker" are enabled once the worker is connected. Every item except Open board, Connect worker… and Quit is disabled while a worker enrolment, a backup, Quit or another of these actions is running, and a click that still arrives is refused and written to `logs/app.log`.
+The app has no window and no Dock icon. The menu has "Open board", one line per process and the "Last backup" line, the version line, then "Restart server", "Back up now", "Restart worker", "Disconnect worker", "Check worker", "Open logs folder", "Open settings file (applies after Quit and reopen)", "Connect worker…" and "Quit". "Open board" and "Connect worker…" are enabled once the proxy runs. "Restart worker", "Disconnect worker" and "Check worker" are enabled once the worker is connected. Every item except Open board, Connect worker… and Quit is disabled while a worker enrolment, a backup, Quit or another of these actions is running, and a click that still arrives is refused and written to `logs/app.log`.
 
-"Restart server" restarts the backend only, and starts the proxy again when it is not running; a backend that gave up after repeated crashes tries again. The worker and its running cards are not touched. "Restart worker" restarts the listener, the watcher and the dispatch tick without pausing running cards. "Disconnect worker" stops the worker, asks its running cards to pause, deletes the machine token and the data key from the Keychain and shows "Worker not connected"; `worker/config/` stays. The token stays valid on the board until it is revoked there. No action re-reads `settings.json`; Quit and open the app again for that. "Open board" hands `http://127.0.0.1:<port>/` to the desktop client (bundle identifier `com.mloureiro.agent-board-client`) when macOS knows an application with that identifier, and otherwise opens it in the default browser. The client does not act on the URL yet, so today it only comes forward. The board's keys live where it is opened: the client and each browser unlock once with the passphrase.
+"Back up now" is enabled while the backend runs; see "Backup and restore". "Restart server" restarts the backend only, and starts the proxy again when it is not running; a backend that gave up after repeated crashes tries again. The worker and its running cards are not touched. "Restart worker" restarts the listener, the watcher and the dispatch tick without pausing running cards. "Disconnect worker" stops the worker, asks its running cards to pause, deletes the machine token and the data key from the Keychain and shows "Worker not connected"; `worker/config/` stays. The token stays valid on the board until it is revoked there. No action re-reads `settings.json`; Quit and open the app again for that. "Open board" hands `http://127.0.0.1:<port>/` to the desktop client (bundle identifier `com.mloureiro.agent-board-client`) when macOS knows an application with that identifier, and otherwise opens it in the default browser. The client does not act on the URL yet, so today it only comes forward. The board's keys live where it is opened: the client and each browser unlock once with the passphrase.
 
 While a row is failing, the menu bar icon carries a `!` mark and its tooltip is that row's line. A row is failing when it is not started, when it crashed and no restart is pending, or when the Worker line shows "refused — …" or "error — …". The first such row in menu order is the one shown, and a restart in progress does not count. The mark and the tooltip clear when every row has recovered. A disabled line near the bottom of the menu reads "core `<7 characters of the pinned commit>` · core built `<date>`", or "core unknown" when the build manifest cannot be read.
+
+## Backup and restore
+
+A backup is a copy of `data/pglite/`. The app stops the backend for the copy and starts it again, so for a few seconds the board answers 502 and a dispatch tick that falls in that window may fail. Backups go to `backups/` under the app folder, or to the folder named by `backupDir` in `settings.json`. A folder on another volume makes the copy a full copy instead of a clone, and the stop lasts longer.
+
+- **Back up now** (tray): copies into `manual-<time>/`. The newest 5 manual backups are kept. The "Last backup" line shows the time of the last one this session, or why it failed. Quit during a backup waits for the copy.
+- **Before the first start on a new core**: when `data/core-commit` differs from the commit the app bundles, or is missing while a database exists, the app copies the database into `pre-upgrade-<commit>-<time>/` before the backend starts, then records the new commit. These backups are never deleted by the app. If the copy fails (disk full, folder not writable) or the bundled commit cannot be read, the backend stays stopped and its line reads "not started" with the reason, and the new core never migrates a database that has no backup. Fix the cause and choose "Restart server": it tries the backup again first.
+- **A copy is whole or absent**: it is written to `<name>.partial/` and renamed when complete; leftover `.partial` folders are removed at the next manual backup.
+
+**Restore**, with the app stopped (Quit from the tray):
+
+1. Move `<dataDir>/pglite` aside, for example to `pglite.before-restore`.
+2. Copy `<backup folder>/<backup>/pglite` to `<dataDir>/pglite`.
+3. Open the app.
+
+Leave `data/core-commit` alone: a database older than the record is migrated at start, and the backup it came from still exists. A machine token issued after the backup is not in the restored database, so the board refuses it; issue a new one and use "Connect worker…".
+
+The headless runner takes `SIGUSR1` as "Back up now" and prints `backup written to <path>` or `backup failed: <reason>`.
 
 ## The worker
 

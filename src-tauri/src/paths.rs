@@ -63,6 +63,10 @@ impl AppPaths {
         self.root.join("data")
     }
 
+    pub fn default_backups_dir(&self) -> PathBuf {
+        self.root.join("backups")
+    }
+
     pub fn worker_dir(&self) -> PathBuf {
         self.root.join("worker")
     }
@@ -104,6 +108,10 @@ impl AppPaths {
 
 pub fn pglite_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("pglite")
+}
+
+pub fn core_commit_file(data_dir: &Path) -> PathBuf {
+    data_dir.join("core-commit")
 }
 
 #[derive(Debug, Clone)]

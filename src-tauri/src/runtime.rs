@@ -4,21 +4,24 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::activity::{Activity, Guard, Kind};
 use crate::applog::LogFile;
 use crate::backend::{self, Healthz};
+use crate::backup;
+use crate::core_build::CoreBuild;
+use crate::localtime;
 use crate::paths::{AppPaths, Resources, Sidecars};
 use crate::proxy::{Proxy, ProxyConfig};
 use crate::secrets::{proxy_secret, SecretError, SecretStore};
 use crate::settings::{Settings, SettingsError};
 use crate::supervisor::orphans;
 use crate::supervisor::process::stop_requested;
-use crate::supervisor::table::{changed_labels, BACKEND, PROXY, WORKER, WORKER_LISTEN};
+use crate::supervisor::table::{changed_labels, BACKEND, BACKUP, PROXY, WORKER, WORKER_LISTEN};
 use crate::supervisor::{
-    supervise, Command, Control, Launcher, ProcessSpec, RunningProcess, Spawned, Status,
+    supervise, Command, Control, Launcher, ProcessSpec, Readiness, RunningProcess, Spawned, Status,
     StatusBoard,
 };
 use crate::worker::check::summary;
@@ -77,6 +80,7 @@ pub struct Handle {
     backend_task: JoinHandle<()>,
     worker: Option<Arc<WorkerControl>>,
     settings: Settings,
+    backups_dir: PathBuf,
     proxy_setup: ProxySetup,
     board: Arc<StatusBoard>,
     activity: Arc<Activity>,
@@ -95,6 +99,46 @@ impl Handle {
         match &self.worker {
             Some(worker) => worker.enrol(token, data_key).await,
             None => Err(EnrolError::new("this run has no worker")),
+        }
+    }
+
+    pub async fn back_up_now(&self) -> Result<PathBuf, ActionError> {
+        let _gate = begin(&self.activity, Kind::Backup)?;
+        let no_backend = || ActionError::Failed("the backend is not running".into());
+        if !matches!(self.board.get(BACKEND), Some(Status::Running { .. })) {
+            return Err(no_backend());
+        }
+        let (held, acknowledged) = oneshot::channel();
+        let hold = Command::Hold {
+            note: "backing up".into(),
+            held,
+        };
+        self.backend
+            .commands
+            .send(hold)
+            .await
+            .map_err(|_| no_backend())?;
+        acknowledged.await.map_err(|_| no_backend())?;
+
+        let data_dir = self.settings.data_dir.clone();
+        let backups_dir = self.backups_dir.clone();
+        let copied = tokio::task::spawn_blocking(move || {
+            backup::manual(&data_dir, &backups_dir, &localtime::compact())
+        })
+        .await
+        .unwrap_or_else(|error| Err(error.to_string()));
+        let _ = self.backend.commands.send(Command::Resume).await;
+
+        match copied {
+            Ok(path) => {
+                self.board.set(BACKUP, Status::Note(localtime::clock()));
+                Ok(path)
+            }
+            Err(reason) => {
+                self.board
+                    .set(BACKUP, Status::Note(format!("failed ({reason})")));
+                Err(ActionError::Failed(reason))
+            }
         }
     }
 
@@ -147,6 +191,13 @@ async fn worker_of(running: &Running) -> Result<Arc<WorkerControl>, ActionError>
 pub async fn restart_server(running: &Running) -> Result<(), ActionError> {
     match running.lock().await.as_mut() {
         Some(handle) => handle.restart_server().await,
+        None => Err(ActionError::Failed("the app is not running".into())),
+    }
+}
+
+pub async fn back_up_now(running: &Running) -> Result<PathBuf, ActionError> {
+    match running.lock().await.as_ref() {
+        Some(handle) => handle.back_up_now().await,
         None => Err(ActionError::Failed("the app is not running".into())),
     }
 }
@@ -231,12 +282,18 @@ pub async fn start(
         Some(worker) => tokio::spawn(run_worker(worker.clone(), board.clone(), worker_stopped)),
         None => tokio::spawn(async {}),
     };
+    let backups_dir = settings.backups_dir(&config.paths);
     let backend_task = if config.upstream_override.is_some() {
         tokio::spawn(async {})
     } else {
         let log = config.paths.log_file(BACKEND);
-        tokio::spawn(supervise(
-            BACKEND,
+        let upgrade = PreUpgrade {
+            data_dir: settings.data_dir.clone(),
+            backups_dir: backups_dir.clone(),
+            bundled: CoreBuild::read(&config.resources.core_build()),
+            log: LogFile::new(config.paths.log_file("app")),
+        };
+        tokio::spawn(run_backend(
             BackendLauncher {
                 config,
                 settings: settings.clone(),
@@ -246,6 +303,7 @@ pub async fn start(
             Some(Healthz),
             board.clone(),
             log,
+            upgrade,
             backend_stopped,
             backend_commands,
         ))
@@ -261,6 +319,7 @@ pub async fn start(
         backend_task,
         worker,
         settings,
+        backups_dir,
         proxy_setup,
         board,
         activity,
@@ -401,6 +460,78 @@ async fn serve_proxy(setup: ProxySetup, board: Arc<StatusBoard>, mut stop: watch
     }
 }
 
+#[derive(Clone)]
+struct PreUpgrade {
+    data_dir: PathBuf,
+    backups_dir: PathBuf,
+    bundled: Option<CoreBuild>,
+    log: LogFile,
+}
+
+impl PreUpgrade {
+    async fn run(&self) -> Result<(), String> {
+        let this = self.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            backup::pre_upgrade(
+                &this.data_dir,
+                &this.backups_dir,
+                this.bundled.as_ref(),
+                &localtime::compact(),
+            )
+        })
+        .await
+        .unwrap_or_else(|error| Err(error.to_string()))?;
+        if let Some(written) = outcome {
+            self.log.write(&format!(
+                "backup before the upgrade written to {}",
+                written.display()
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The new core never migrates a database without a backup: until the pre-upgrade step succeeds nothing starts,
+/// and only a restart request or a stop moves the task on.
+async fn run_backend<L: Launcher, R: Readiness>(
+    launcher: L,
+    readiness: Option<R>,
+    board: Arc<StatusBoard>,
+    log: PathBuf,
+    upgrade: PreUpgrade,
+    mut stop: watch::Receiver<bool>,
+    mut commands: mpsc::Receiver<Command>,
+) {
+    while let Err(reason) = upgrade.run().await {
+        board.set(BACKEND, Status::Blocked { reason });
+        if !restart_requested(&mut stop, &mut commands).await {
+            board.set(BACKEND, Status::Stopped);
+            return;
+        }
+    }
+    if *stop.borrow() {
+        board.set(BACKEND, Status::Stopped);
+        return;
+    }
+    supervise(BACKEND, launcher, readiness, board, log, stop, commands).await;
+}
+
+async fn restart_requested(
+    stop: &mut watch::Receiver<bool>,
+    commands: &mut mpsc::Receiver<Command>,
+) -> bool {
+    loop {
+        tokio::select! {
+            () = stop_requested(stop) => return false,
+            command = commands.recv() => match command {
+                Some(Command::Restart) => return true,
+                Some(_) => {}
+                None => return false,
+            },
+        }
+    }
+}
+
 struct BackendLauncher {
     config: Config,
     settings: Settings,
@@ -428,7 +559,137 @@ impl Launcher for BackendLauncher {
 
 #[cfg(test)]
 mod tests {
+    use std::future::pending;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::supervisor::{NoReadiness, Supervised};
+
     use super::*;
+
+    struct Idle;
+
+    impl Supervised for Idle {
+        async fn wait(&mut self) -> String {
+            pending().await
+        }
+
+        async fn stop(&mut self, _grace: Duration) {}
+
+        fn running_status(&self) -> Status {
+            Status::Running { port: 4000 }
+        }
+    }
+
+    struct Counting(Arc<AtomicUsize>);
+
+    impl Launcher for Counting {
+        type Process = Idle;
+
+        fn launch(&mut self) -> Result<Idle, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Idle)
+        }
+    }
+
+    async fn until(board: &StatusBoard, wanted: impl Fn(Option<Status>) -> bool) {
+        let mut changes = board.subscribe();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !wanted(board.get(BACKEND)) {
+                changes.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("the backend row did not reach the wanted state");
+    }
+
+    #[tokio::test]
+    async fn a_failed_pre_upgrade_backup_blocks_the_backend_and_a_restart_retries_it() {
+        let data = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(data.path().join("pglite")).unwrap();
+        std::fs::write(data.path().join("pglite/PG_VERSION"), "16").unwrap();
+        backup::record(data.path(), "aaaaaaa").unwrap();
+        let backups = tempfile::tempdir().unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(backups.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let launches = Arc::new(AtomicUsize::new(0));
+        let board = Arc::new(StatusBoard::default());
+        let (control, stopped, commands) = Control::new();
+        let upgrade = PreUpgrade {
+            data_dir: data.path().to_path_buf(),
+            backups_dir: backups.path().to_path_buf(),
+            bundled: Some(CoreBuild {
+                commit: "bbbbbbb1234".into(),
+                built_at: "2026-11-20T08:15:00.000Z".into(),
+            }),
+            log: LogFile::new(logs.path().join("app.log")),
+        };
+        let task = tokio::spawn(run_backend(
+            Counting(launches.clone()),
+            None::<NoReadiness>,
+            board.clone(),
+            logs.path().join("backend.log"),
+            upgrade,
+            stopped,
+            commands,
+        ));
+
+        until(&board, |row| matches!(row, Some(Status::Blocked { .. }))).await;
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            backup::read_recorded(data.path()).as_deref(),
+            Some("aaaaaaa")
+        );
+
+        std::fs::set_permissions(backups.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        control.commands.send(Command::Restart).await.unwrap();
+        until(&board, |row| matches!(row, Some(Status::Running { .. }))).await;
+
+        assert_eq!(launches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            backup::read_recorded(data.path()).as_deref(),
+            Some("bbbbbbb1234")
+        );
+        assert!(backups.path().read_dir().unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("pre-upgrade-bbbbbbb-")));
+        control.stop();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stop_while_the_backend_is_blocked_ends_the_task_without_starting_it() {
+        let data = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(data.path().join("pglite")).unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let launches = Arc::new(AtomicUsize::new(0));
+        let board = Arc::new(StatusBoard::default());
+        let (control, stopped, commands) = Control::new();
+        let upgrade = PreUpgrade {
+            data_dir: data.path().to_path_buf(),
+            backups_dir: logs.path().join("backups"),
+            bundled: None,
+            log: LogFile::new(logs.path().join("app.log")),
+        };
+        let task = tokio::spawn(run_backend(
+            Counting(launches.clone()),
+            None::<NoReadiness>,
+            board.clone(),
+            logs.path().join("backend.log"),
+            upgrade,
+            stopped,
+            commands,
+        ));
+
+        until(&board, |row| matches!(row, Some(Status::Blocked { .. }))).await;
+        control.stop();
+        task.await.unwrap();
+
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+        assert_eq!(board.get(BACKEND), Some(Status::Stopped));
+    }
 
     #[test]
     fn the_proxy_is_started_again_only_when_its_task_ended_without_it_running() {

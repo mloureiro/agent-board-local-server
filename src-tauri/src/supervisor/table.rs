@@ -8,6 +8,7 @@ pub const WORKER: &str = "worker";
 pub const WORKER_LISTEN: &str = "worker-listen";
 pub const WORKER_WATCH: &str = "worker-watch";
 pub const DISPATCH: &str = "dispatch";
+pub const BACKUP: &str = "backup";
 
 pub struct Row {
     pub name: &'static str,
@@ -15,7 +16,7 @@ pub struct Row {
     pub initial: &'static str,
 }
 
-pub const ROWS: [Row; 6] = [
+pub const ROWS: [Row; 7] = [
     Row {
         name: BACKEND,
         title: "Backend",
@@ -45,6 +46,11 @@ pub const ROWS: [Row; 6] = [
         name: DISPATCH,
         title: "Last dispatch tick",
         initial: "Last dispatch tick: none yet",
+    },
+    Row {
+        name: BACKUP,
+        title: "Last backup",
+        initial: "Last backup: none this session",
     },
 ];
 

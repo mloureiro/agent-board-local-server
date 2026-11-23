@@ -29,3 +29,16 @@ pub fn timestamp() -> String {
         now.tm_sec
     )
 }
+
+pub fn compact() -> String {
+    let now = local_now();
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        now.tm_year + 1900,
+        now.tm_mon + 1,
+        now.tm_mday,
+        now.tm_hour,
+        now.tm_min,
+        now.tm_sec
+    )
+}

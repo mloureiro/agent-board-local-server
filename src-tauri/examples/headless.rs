@@ -174,6 +174,7 @@ async fn main() {
 
     let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
     let mut int = signal(SignalKind::interrupt()).expect("SIGINT handler");
+    let mut back_up = signal(SignalKind::user_defined1()).expect("SIGUSR1 handler");
     let exit_code = {
         let mut enrolment =
             std::pin::pin!(enrol_from_stdin(&handle, &board, args.enrol_from_stdin));
@@ -190,6 +191,10 @@ async fn main() {
                         }
                     }
                 }
+                _ = back_up.recv() => match handle.back_up_now().await {
+                    Ok(path) => println!("backup written to {}", path.display()),
+                    Err(error) => println!("backup failed: {error}"),
+                },
                 _ = term.recv() => break 0,
                 _ = int.recv() => break 0,
             }

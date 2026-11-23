@@ -5,18 +5,17 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
 
-use crate::backend::{self, HEALTH_LIMIT, HEALTH_POLL};
+use crate::backend::{self, Healthz};
 use crate::paths::{AppPaths, Resources, Sidecars};
 use crate::proxy::{Proxy, ProxyConfig};
 use crate::secrets::{proxy_secret, SecretError, SecretStore};
 use crate::settings::{Settings, SettingsError};
 use crate::supervisor::orphans;
-use crate::supervisor::process::{
-    describe_exit, rotate_if_larger, stop_requested, with_log_tail, LOG_LIMIT,
+use crate::supervisor::process::stop_requested;
+use crate::supervisor::{
+    supervise, Control, Launcher, ProcessSpec, RunningProcess, Spawned, Status, StatusBoard,
 };
-use crate::supervisor::{decide, Decision, ProcessSpec, RunningProcess, Status, StatusBoard};
 use crate::worker::control::Enrolled;
 use crate::worker::enrol::EnrolError;
 use crate::worker::processes::{WorkerSetup, WORKER_LISTEN};
@@ -25,8 +24,6 @@ use crate::worker::{env as worker_env, WorkerControl};
 pub const BACKEND: &str = "backend";
 pub const PROXY: &str = "proxy";
 const ORPHAN_GRACE: Duration = Duration::from_secs(5);
-const STOP_GRACE: Duration = Duration::from_secs(10);
-const LOG_CHECK: Duration = Duration::from_secs(60);
 
 pub struct Config {
     pub paths: AppPaths,
@@ -68,7 +65,7 @@ pub type Running = Arc<tokio::sync::Mutex<Option<Handle>>>;
 pub struct Handle {
     stop_worker: watch::Sender<bool>,
     stop_proxy: watch::Sender<bool>,
-    stop_backend: watch::Sender<bool>,
+    backend: Control,
     worker_task: JoinHandle<()>,
     proxy_task: JoinHandle<()>,
     backend_task: JoinHandle<()>,
@@ -94,7 +91,7 @@ impl Handle {
         let _ = self.worker_task.await;
         let _ = self.stop_proxy.send(true);
         let _ = self.proxy_task.await;
-        let _ = self.stop_backend.send(true);
+        self.backend.stop();
         let _ = self.backend_task.await;
     }
 }
@@ -132,7 +129,7 @@ pub async fn start(
 
     let (stop_worker, worker_stopped) = watch::channel(false);
     let (stop_proxy, proxy_stopped) = watch::channel(false);
-    let (stop_backend, backend_stopped) = watch::channel(false);
+    let (backend, backend_stopped, backend_commands) = Control::new();
     let proxy_task = tokio::spawn(serve_proxy(
         ProxySetup {
             port: settings.port,
@@ -151,20 +148,26 @@ pub async fn start(
     let backend_task = if config.upstream_override.is_some() {
         tokio::spawn(async {})
     } else {
-        tokio::spawn(supervise_backend(
-            Backend {
+        let log = config.paths.log_file(BACKEND);
+        tokio::spawn(supervise(
+            BACKEND,
+            BackendLauncher {
                 config,
                 settings,
                 secret,
-                board,
+                port: None,
             },
+            Some(Healthz),
+            board,
+            log,
             backend_stopped,
+            backend_commands,
         ))
     };
     Ok(Handle {
         stop_worker,
         stop_proxy,
-        stop_backend,
+        backend,
         worker_task,
         proxy_task,
         backend_task,
@@ -276,115 +279,27 @@ async fn serve_proxy(setup: ProxySetup, board: Arc<StatusBoard>, mut stop: watch
     }
 }
 
-struct Backend {
+struct BackendLauncher {
     config: Config,
     settings: Settings,
     secret: String,
-    board: Arc<StatusBoard>,
+    port: Option<u16>,
 }
 
-impl Backend {
-    fn spec(&self, port: u16) -> ProcessSpec {
-        ProcessSpec {
+impl Launcher for BackendLauncher {
+    type Process = Spawned;
+
+    fn launch(&mut self) -> Result<Spawned, String> {
+        let port = backend::free_port(self.port).map_err(|error| error.to_string())?;
+        self.port = Some(port);
+        let spec = ProcessSpec {
             name: BACKEND,
             program: self.config.sidecars.board_server.clone(),
             args: Vec::new(),
             env: backend::environment(&self.settings, &self.secret, port, &self.config.resources),
-        }
-    }
-
-    fn crashed(&self, reason: String, restart_in: Option<Duration>) {
-        self.board
-            .set(BACKEND, Status::Crashed { reason, restart_in });
-    }
-}
-
-enum Outcome {
-    Stop,
-    Exited(String),
-    NotHealthy,
-    Healthy,
-}
-
-async fn supervise_backend(backend: Backend, mut stop: watch::Receiver<bool>) {
-    let log = backend.config.paths.log_file(BACKEND);
-    let mut restarts = 0;
-    let mut port = None;
-
-    loop {
-        backend.board.set(BACKEND, Status::Starting);
-        let started = backend::free_port(port)
-            .map_err(|error| error.to_string())
-            .and_then(|free| {
-                port = Some(free);
-                RunningProcess::spawn(&backend.spec(free), &backend.config.paths)
-                    .map(|process| (free, process))
-                    .map_err(|error| format!("cannot start: {error}"))
-            });
-
-        let reason = match started {
-            Err(reason) => reason,
-            Ok((free, mut process)) => {
-                let outcome = tokio::select! {
-                    healthy = backend::wait_healthy(free, HEALTH_POLL, HEALTH_LIMIT) => {
-                        if healthy { Outcome::Healthy } else { Outcome::NotHealthy }
-                    }
-                    status = process.wait() => Outcome::Exited(describe_exit(status)),
-                    () = stop_requested(&mut stop) => Outcome::Stop,
-                };
-                let ended = match outcome {
-                    Outcome::Stop => {
-                        let _ = process.stop(STOP_GRACE).await;
-                        backend.board.set(BACKEND, Status::Stopped);
-                        return;
-                    }
-                    Outcome::NotHealthy => {
-                        let _ = process.stop(STOP_GRACE).await;
-                        Some(format!("not healthy after {} s", HEALTH_LIMIT.as_secs()))
-                    }
-                    Outcome::Exited(reason) => Some(reason),
-                    Outcome::Healthy => None,
-                };
-                match ended {
-                    Some(reason) => reason,
-                    None => {
-                        backend.board.set(BACKEND, Status::Running { port: free });
-                        let exit = loop {
-                            tokio::select! {
-                                status = process.wait() => break Some(describe_exit(status)),
-                                () = stop_requested(&mut stop) => break None,
-                                () = sleep(LOG_CHECK) => { let _ = rotate_if_larger(&log, LOG_LIMIT); }
-                            }
-                        };
-                        let Some(reason) = exit else {
-                            let _ = process.stop(STOP_GRACE).await;
-                            backend.board.set(BACKEND, Status::Stopped);
-                            return;
-                        };
-                        reason
-                    }
-                }
-            }
         };
-
-        let reason = with_log_tail(reason, &log);
-        match decide(restarts) {
-            Decision::Restart { after } => {
-                backend.crashed(reason, Some(after));
-                restarts += 1;
-                tokio::select! {
-                    () = sleep(after) => {}
-                    () = stop_requested(&mut stop) => {
-                        backend.board.set(BACKEND, Status::Stopped);
-                        return;
-                    }
-                }
-            }
-            Decision::GiveUp => {
-                backend.crashed(reason, None);
-                stop_requested(&mut stop).await;
-                return;
-            }
-        }
+        RunningProcess::spawn(&spec, &self.config.paths)
+            .map(|process| Spawned::new(process, Status::Running { port }))
+            .map_err(|error| format!("cannot start: {error}"))
     }
 }

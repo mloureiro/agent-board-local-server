@@ -11,6 +11,7 @@ use tokio::time::{sleep, timeout, Instant};
 
 use crate::paths::{pglite_dir, Resources};
 use crate::settings::Settings;
+use crate::supervisor::{Readiness, Status};
 
 pub const HEALTH_POLL: Duration = Duration::from_millis(250);
 pub const HEALTH_LIMIT: Duration = Duration::from_secs(180);
@@ -92,6 +93,24 @@ pub async fn wait_healthy(port: u16, poll: Duration, limit: Duration) -> bool {
         sleep(poll).await;
     }
     false
+}
+
+pub struct Healthz;
+
+impl Readiness for Healthz {
+    async fn first(&self, running: &Status) -> bool {
+        match running {
+            Status::Running { port } => wait_healthy(*port, HEALTH_POLL, HEALTH_LIMIT).await,
+            _ => false,
+        }
+    }
+
+    async fn probe(&self, running: &Status) -> bool {
+        match running {
+            Status::Running { port } => healthy(*port).await,
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -12,6 +12,7 @@ import {
   isBuildCurrent,
   bunVersionError,
   missingTools,
+  needsCheckoutRestore,
   parseBuildArgs,
   parseCoreBuild,
   parsePinnedBun,
@@ -119,8 +120,25 @@ function main(): void {
 
   const recipe = recipeFingerprint();
 
-  if (isBuildCurrent(readRecordedBuild(stageDir), { commit: pin.commit, bun, recipe }, hashStaged(stageDir))) {
-    console.log(`The core at ${pin.commit} is already built and staged`);
+  const stageCurrent = isBuildCurrent(
+    readRecordedBuild(stageDir),
+    { commit: pin.commit, bun, recipe },
+    hashStaged(stageDir),
+  );
+  if (stageCurrent) {
+    const checkout = join(root, '.core', pin.commit);
+    const restore =
+      args.out === null &&
+      needsCheckoutRestore(stageCurrent, {
+        present: existsSync(join(checkout, '.git')),
+        hasNodeModules: existsSync(join(checkout, 'node_modules')),
+      });
+    if (restore) {
+      run('pnpm', ['install', '--frozen-lockfile'], materialise(pin.repository, pin.commit));
+      console.log(`Restored the core checkout at ${pin.commit}; the staged build was already current`);
+    } else {
+      console.log(`The core at ${pin.commit} is already built and staged`);
+    }
     return;
   }
 

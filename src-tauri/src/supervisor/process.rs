@@ -9,6 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
 
+use super::state::Status;
+use super::supervise::Supervised;
 use crate::paths::AppPaths;
 
 pub const LOG_LIMIT: u64 = 10 * 1024 * 1024;
@@ -108,6 +110,32 @@ impl RunningProcess {
             signal_group(self.pid, libc::SIGKILL);
         }
         self.wait().await
+    }
+}
+
+/// A running child that shows `status` on the board once it is up.
+pub struct Spawned {
+    process: RunningProcess,
+    status: Status,
+}
+
+impl Spawned {
+    pub fn new(process: RunningProcess, status: Status) -> Self {
+        Self { process, status }
+    }
+}
+
+impl Supervised for Spawned {
+    async fn wait(&mut self) -> String {
+        describe_exit(self.process.wait().await)
+    }
+
+    async fn stop(&mut self, grace: Duration) {
+        let _ = self.process.stop(grace).await;
+    }
+
+    fn running_status(&self) -> Status {
+        self.status.clone()
     }
 }
 

@@ -4,14 +4,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use super::report::worker_note;
 use crate::paths::AppPaths;
-use crate::supervisor::process::{describe_exit, stop_requested, with_log_tail};
-use crate::supervisor::{decide, Decision, ProcessSpec, RunningProcess, Status, StatusBoard};
+use crate::supervisor::process::stop_requested;
+use crate::supervisor::{
+    supervise, Launcher, NoReadiness, ProcessSpec, RunningProcess, Spawned, Status, StatusBoard,
+};
 
 pub const WORKER_LISTEN: &str = "worker-listen";
 pub const WORKER_WATCH: &str = "worker-watch";
@@ -140,20 +142,20 @@ impl Processes {
             Status::Note("waiting for the first dispatch tick".into()),
         );
         let tasks = vec![
-            tokio::spawn(supervise(
-                self.setup.clone(),
-                self.board.clone(),
+            supervise_worker(
+                &self.setup,
+                &self.board,
                 WORKER_LISTEN,
                 &["internal", "listen"],
                 stopped.clone(),
-            )),
-            tokio::spawn(supervise(
-                self.setup.clone(),
-                self.board.clone(),
+            ),
+            supervise_worker(
+                &self.setup,
+                &self.board,
                 WORKER_WATCH,
                 &["internal", "watch"],
                 stopped.clone(),
-            )),
+            ),
             tokio::spawn(dispatch_timer(
                 self.setup.clone(),
                 self.board.clone(),
@@ -174,63 +176,43 @@ impl Processes {
     }
 }
 
-async fn supervise(
+struct WorkerLauncher {
     setup: Arc<WorkerSetup>,
-    board: Arc<StatusBoard>,
     name: &'static str,
     args: &'static [&'static str],
-    mut stop: watch::Receiver<bool>,
-) {
-    let log = setup.paths.log_file(name);
-    let mut restarts = 0;
-    loop {
-        board.set(name, Status::Starting);
-        let reason = match RunningProcess::spawn(&setup.spec(name, args), &setup.paths) {
-            Err(error) => format!("cannot start: {error}"),
-            Ok(mut process) => {
-                board.set(name, Status::Note("running".into()));
-                tokio::select! {
-                    status = process.wait() => with_log_tail(describe_exit(status), &log),
-                    () = stop_requested(&mut stop) => {
-                        let _ = process.stop(STOP_GRACE).await;
-                        board.set(name, Status::Stopped);
-                        return;
-                    }
-                }
-            }
-        };
+}
 
-        match decide(restarts) {
-            Decision::Restart { after } => {
-                board.set(
-                    name,
-                    Status::Crashed {
-                        reason,
-                        restart_in: Some(after),
-                    },
-                );
-                restarts += 1;
-                tokio::select! {
-                    () = sleep(after) => {}
-                    () = stop_requested(&mut stop) => {
-                        board.set(name, Status::Stopped);
-                        return;
-                    }
-                }
-            }
-            Decision::GiveUp => {
-                board.set(
-                    name,
-                    Status::Crashed {
-                        reason,
-                        restart_in: None,
-                    },
-                );
-                stop_requested(&mut stop).await;
-                return;
-            }
-        }
+impl Launcher for WorkerLauncher {
+    type Process = Spawned;
+
+    fn launch(&mut self) -> Result<Spawned, String> {
+        RunningProcess::spawn(&self.setup.spec(self.name, self.args), &self.setup.paths)
+            .map(|process| Spawned::new(process, Status::Note("running".into())))
+            .map_err(|error| format!("cannot start: {error}"))
     }
+}
+
+fn supervise_worker(
+    setup: &Arc<WorkerSetup>,
+    board: &Arc<StatusBoard>,
+    name: &'static str,
+    args: &'static [&'static str],
+    stop: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    let (_commands, received) = mpsc::channel(1);
+    tokio::spawn(supervise(
+        name,
+        WorkerLauncher {
+            setup: setup.clone(),
+            name,
+            args,
+        },
+        None::<NoReadiness>,
+        board.clone(),
+        setup.paths.log_file(name),
+        stop,
+        received,
+    ))
 }
 
 enum Tick {

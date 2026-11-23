@@ -12,7 +12,6 @@ pub enum Decision {
     GiveUp,
 }
 
-/// `restarts_so_far` counts the restarts already done for this process since the app started.
 pub fn decide(restarts_so_far: usize) -> Decision {
     match BACKOFF.get(restarts_so_far) {
         Some(after) => Decision::Restart { after: *after },

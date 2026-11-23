@@ -82,6 +82,11 @@ export function isBuildCurrent(
   return recordedPaths.every((path) => recorded.files[path] === actualFiles[path]);
 }
 
+export const needsCheckoutRestore = (
+  stageCurrent: boolean,
+  checkout: { present: boolean; hasNodeModules: boolean },
+): boolean => stageCurrent && !(checkout.present && checkout.hasNodeModules);
+
 export function parseBuildArgs(argv: string[]): { pin: string | null; out: string | null } {
   let pin: string | null = null;
   let out: string | null = null;

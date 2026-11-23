@@ -2,8 +2,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::applog::LogFile;
 use crate::core_build::CoreBuild;
-use crate::paths::{core_commit_file, pglite_dir};
+use crate::paths::{core_commit_file, is_within, pglite_dir};
 
 pub const KEEP_MANUAL: usize = 5;
 const PARTIAL: &str = ".partial";
@@ -60,6 +61,12 @@ fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 pub fn back_up(data_dir: &Path, backups_dir: &Path, name: &str) -> io::Result<PathBuf> {
+    if is_within(backups_dir, data_dir) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the backup folder is the data folder or inside it",
+        ));
+    }
     let finished = backups_dir.join(name);
     let partial = backups_dir.join(format!("{name}{PARTIAL}"));
     if partial.exists() {
@@ -92,10 +99,19 @@ pub fn prune_manual(backups_dir: &Path, keep: usize) -> io::Result<()> {
     Ok(())
 }
 
-pub fn manual(data_dir: &Path, backups_dir: &Path, stamp: &str) -> Result<PathBuf, String> {
+pub fn manual(
+    data_dir: &Path,
+    backups_dir: &Path,
+    stamp: &str,
+    log: &LogFile,
+) -> Result<PathBuf, String> {
     let written = back_up(data_dir, backups_dir, &manual_name(stamp))
         .map_err(|error| format!("cannot copy the database: {error}"))?;
-    let _ = prune_manual(backups_dir, KEEP_MANUAL);
+    if let Err(error) = prune_manual(backups_dir, KEEP_MANUAL) {
+        log.write(&format!(
+            "backup: cannot remove old manual backups: {error}"
+        ));
+    }
     Ok(written)
 }
 
@@ -285,12 +301,54 @@ mod tests {
             fs::create_dir(backups.path().join(format!("manual-2026110{day}-100000"))).unwrap();
         }
 
-        manual(data.path(), backups.path(), "20261123-141502").unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let log = LogFile::new(logs.path().join("app.log"));
+
+        manual(data.path(), backups.path(), "20261123-141502", &log).unwrap();
 
         let kept = names(backups.path());
         assert_eq!(kept.len(), 5);
         assert!(!kept.contains(&"manual-20261101-100000".to_owned()));
         assert!(kept.contains(&"manual-20261123-141502".to_owned()));
+    }
+
+    #[test]
+    fn a_failed_prune_is_logged_and_the_backup_still_counts() {
+        let data = data_dir_with_database();
+        let backups = tempfile::tempdir().unwrap();
+        let old = backups.path().join("manual-20261101-100000");
+        fs::create_dir_all(old.join("inner")).unwrap();
+        for day in 2..=6 {
+            fs::create_dir(backups.path().join(format!("manual-2026110{day}-100000"))).unwrap();
+        }
+        unwritable(&old);
+        let logs = tempfile::tempdir().unwrap();
+        let log = LogFile::new(logs.path().join("app.log"));
+
+        let written = manual(data.path(), backups.path(), "20261123-141502", &log);
+
+        writable(&old);
+        assert!(written.is_ok());
+        assert!(fs::read_to_string(log.path())
+            .unwrap()
+            .contains("cannot remove old manual backups"));
+    }
+
+    #[test]
+    fn a_backup_folder_that_resolves_into_the_data_folder_is_refused_before_any_copy() {
+        let data = data_dir_with_database();
+        let link = data.path().join("..").join(format!(
+            "{}-link",
+            data.path().file_name().unwrap().to_string_lossy()
+        ));
+        std::os::unix::fs::symlink(pglite_dir(data.path()), &link).unwrap();
+        let inside = link.join("b");
+
+        let result = back_up(data.path(), &inside, "manual-1");
+        fs::remove_file(&link).unwrap();
+
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert!(!pglite_dir(data.path()).join("b").exists());
     }
 
     #[test]

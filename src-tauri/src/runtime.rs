@@ -81,6 +81,7 @@ pub struct Handle {
     worker: Option<Arc<WorkerControl>>,
     settings: Settings,
     backups_dir: PathBuf,
+    app_log: LogFile,
     proxy_setup: ProxySetup,
     board: Arc<StatusBoard>,
     activity: Arc<Activity>,
@@ -122,8 +123,9 @@ impl Handle {
 
         let data_dir = self.settings.data_dir.clone();
         let backups_dir = self.backups_dir.clone();
+        let log = self.app_log.clone();
         let copied = tokio::task::spawn_blocking(move || {
-            backup::manual(&data_dir, &backups_dir, &localtime::compact())
+            backup::manual(&data_dir, &backups_dir, &localtime::compact(), &log)
         })
         .await
         .unwrap_or_else(|error| Err(error.to_string()));
@@ -283,6 +285,7 @@ pub async fn start(
         None => tokio::spawn(async {}),
     };
     let backups_dir = settings.backups_dir(&config.paths);
+    let app_log_path = config.paths.log_file("app");
     let backend_task = if config.upstream_override.is_some() {
         tokio::spawn(async {})
     } else {
@@ -320,6 +323,7 @@ pub async fn start(
         worker,
         settings,
         backups_dir,
+        app_log: LogFile::new(app_log_path),
         proxy_setup,
         board,
         activity,
@@ -491,8 +495,6 @@ impl PreUpgrade {
     }
 }
 
-/// The new core never migrates a database without a backup: until the pre-upgrade step succeeds nothing starts,
-/// and only a restart request or a stop moves the task on.
 async fn run_backend<L: Launcher, R: Readiness>(
     launcher: L,
     readiness: Option<R>,

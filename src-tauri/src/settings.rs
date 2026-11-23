@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::paths::AppPaths;
+use crate::paths::{has_parent_component, is_within, AppPaths};
 
 pub const DEFAULT_PORT: u16 = 4785;
 const MIN_PORT: i64 = 1024;
@@ -150,6 +150,12 @@ fn validate_data_dir(dir: PathBuf) -> Result<PathBuf, SettingsError> {
             reason: "must be an absolute path".into(),
         });
     }
+    if has_parent_component(&dir) {
+        return Err(SettingsError::Invalid {
+            field: "dataDir",
+            reason: "must not contain '..'".into(),
+        });
+    }
     if inside_app_bundle(&dir) {
         return Err(SettingsError::Invalid {
             field: "dataDir",
@@ -167,10 +173,13 @@ fn validate_backup_dir(dir: PathBuf, data_dir: &Path) -> Result<PathBuf, Setting
     if !dir.is_absolute() {
         return Err(invalid("must be an absolute path"));
     }
+    if has_parent_component(&dir) {
+        return Err(invalid("must not contain '..'"));
+    }
     if inside_app_bundle(&dir) {
         return Err(invalid("must not be inside an app bundle"));
     }
-    if dir.starts_with(data_dir) {
+    if is_within(&dir, data_dir) {
         return Err(invalid("must not be dataDir or inside it"));
     }
     Ok(dir)
@@ -303,6 +312,13 @@ mod tests {
                 r#"{"dataDir": "/elsewhere/data", "backupDir": "/elsewhere/data/b"}"#,
                 "backupDir",
             ),
+            (r#"{"backupDir": "/root/x/../data/pglite/b"}"#, "backupDir"),
+            (r#"{"backupDir": "/elsewhere/../b"}"#, "backupDir"),
+            (r#"{"dataDir": "/root/a/../data"}"#, "dataDir"),
+            (
+                r#"{"dataDir": "/root/a/../data", "backupDir": "/root/data/pglite/b"}"#,
+                "dataDir",
+            ),
             (r#"{"workerPath": ["bin"]}"#, "workerPath"),
             (r#"{"workerPath": ["/a:/b"]}"#, "workerPath"),
             (r#"{"workerPath": ["/a\nb"]}"#, "workerPath"),
@@ -340,6 +356,25 @@ mod tests {
             defaults().backups_dir(&paths),
             PathBuf::from("/root/backups")
         );
+    }
+
+    #[test]
+    fn a_backup_folder_that_is_a_symlink_into_the_data_folder_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        fs::create_dir_all(data.join("pglite")).unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(data.join("pglite"), &link).unwrap();
+        let text = format!(
+            r#"{{"dataDir": "{}", "backupDir": "{}"}}"#,
+            data.display(),
+            link.join("b").display()
+        );
+
+        match Settings::parse(&text, &defaults()) {
+            Err(SettingsError::Invalid { field, .. }) => assert_eq!(field, "backupDir"),
+            other => panic!("should be refused on backupDir, got {other:?}"),
+        }
     }
 
     #[test]

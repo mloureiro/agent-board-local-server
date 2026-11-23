@@ -129,6 +129,7 @@ mod tests {
             port: 4785,
             start_at_login: true,
             worker_path: Vec::new(),
+            backup_dir: None,
         };
         let resources = Resources::new("/App/Contents/Resources");
         let url = "/Users/ines/Library/Application%20Support/app/data/pglite";

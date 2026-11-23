@@ -2,12 +2,13 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::{AppHandle, Wry};
 
 use crate::core_build::CoreBuild;
-use crate::supervisor::table::{PROXY, ROWS, WORKER_LISTEN};
+use crate::supervisor::table::{BACKEND, PROXY, ROWS, WORKER_LISTEN};
 use crate::supervisor::{Status, StatusBoard};
 
 pub const OPEN_BOARD: &str = "open-board";
 pub const CONNECT_WORKER: &str = "connect-worker";
 pub const CHECK_WORKER: &str = "check-worker";
+pub const BACK_UP_NOW: &str = "back-up-now";
 pub const RESTART_SERVER: &str = "restart-server";
 pub const RESTART_WORKER: &str = "restart-worker";
 pub const DISCONNECT_WORKER: &str = "disconnect-worker";
@@ -41,6 +42,10 @@ pub fn worker_action_enabled(busy: bool, listener: Option<&Status>) -> bool {
     action_enabled(busy) && worker_connected(listener)
 }
 
+pub fn backup_enabled(busy: bool, backend: Option<&Status>) -> bool {
+    action_enabled(busy) && matches!(backend, Some(Status::Running { .. }))
+}
+
 pub fn version_line(build: Option<&CoreBuild>) -> String {
     match build {
         Some(build) => format!(
@@ -58,6 +63,7 @@ pub struct TrayMenu {
     connect: MenuItem<Wry>,
     check: MenuItem<Wry>,
     restart_server: MenuItem<Wry>,
+    back_up: MenuItem<Wry>,
     restart_worker: MenuItem<Wry>,
     disconnect: MenuItem<Wry>,
     open_logs: MenuItem<Wry>,
@@ -73,6 +79,7 @@ impl TrayMenu {
         let check = MenuItem::with_id(app, CHECK_WORKER, "Check worker", false, None::<&str>)?;
         let item = |id: &str, label: &str| MenuItem::with_id(app, id, label, false, None::<&str>);
         let restart_server = item(RESTART_SERVER, "Restart server")?;
+        let back_up = item(BACK_UP_NOW, "Back up now")?;
         let restart_worker = item(RESTART_WORKER, "Restart worker")?;
         let disconnect = item(DISCONNECT_WORKER, "Disconnect worker")?;
         let open_logs = item(OPEN_LOGS, "Open logs folder")?;
@@ -112,6 +119,7 @@ impl TrayMenu {
             &lower_divider as &dyn tauri::menu::IsMenuItem<Wry>,
             &version,
             &restart_server,
+            &back_up,
             &restart_worker,
             &disconnect,
             &check,
@@ -127,6 +135,7 @@ impl TrayMenu {
             connect,
             check,
             restart_server,
+            back_up,
             restart_worker,
             disconnect,
             open_logs,
@@ -152,6 +161,9 @@ impl TrayMenu {
         for item in [&self.restart_server, &self.open_logs, &self.open_settings] {
             let _ = item.set_enabled(action_enabled(busy));
         }
+        let _ = self
+            .back_up
+            .set_enabled(backup_enabled(busy, board.get(BACKEND).as_ref()));
         for item in [&self.restart_worker, &self.disconnect, &self.check] {
             let _ = item.set_enabled(worker_action_enabled(busy, listener.as_ref()));
         }
@@ -206,6 +218,20 @@ mod tests {
         assert!(worker_action_enabled(false, Some(&Status::Starting)));
         assert!(worker_action_enabled(false, Some(&blocked)));
         assert!(!worker_action_enabled(true, Some(&Status::Starting)));
+    }
+
+    #[test]
+    fn a_backup_needs_a_running_backend_and_a_free_gate() {
+        let running = Status::Running { port: 4785 };
+
+        assert!(backup_enabled(false, Some(&running)));
+        assert!(!backup_enabled(true, Some(&running)));
+        assert!(!backup_enabled(false, Some(&Status::Starting)));
+        assert!(!backup_enabled(
+            false,
+            Some(&Status::Note("backing up".into()))
+        ));
+        assert!(!backup_enabled(false, None));
     }
 
     #[test]

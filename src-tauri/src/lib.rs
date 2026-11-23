@@ -2,6 +2,7 @@ pub mod activity;
 mod app;
 pub mod applog;
 pub mod backend;
+pub mod backup;
 pub mod core_build;
 pub mod enrol_window;
 pub mod localtime;

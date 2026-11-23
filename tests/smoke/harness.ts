@@ -101,6 +101,7 @@ function alive(pid: number): boolean {
 export interface Runner {
   /** Writes one line to the runner's stdin; the headless runner reads the machine token and the data key from it. */
   writeLine: (line: string) => void;
+  signal: (name: NodeJS.Signals) => void;
   /** Resolves with the first match in what the runner printed so far or prints next; fails after the timeout. */
   waitFor: (pattern: RegExp, timeoutMs: number) => Promise<RegExpMatchArray>;
   waitForNew: (pattern: RegExp, timeoutMs: number) => Promise<RegExpMatchArray>;
@@ -194,6 +195,9 @@ export async function startRunner(
   return {
     writeLine: (line) => {
       child.stdin.write(`${line}\n`);
+    },
+    signal: (name) => {
+      child.kill(name);
     },
     waitFor: wait,
     waitForNew: (pattern, timeoutMs) => waitFrom(output.length, pattern, timeoutMs),

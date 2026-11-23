@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub const APP_IDENTIFIER: &str = "dev.mloureiro.agent-board-local-server";
 pub const ROOT_ENV: &str = "AGENT_BOARD_LOCAL_SERVER_ROOT";
@@ -63,6 +63,10 @@ impl AppPaths {
         self.root.join("data")
     }
 
+    pub fn default_backups_dir(&self) -> PathBuf {
+        self.root.join("backups")
+    }
+
     pub fn worker_dir(&self) -> PathBuf {
         self.root.join("worker")
     }
@@ -104,6 +108,35 @@ impl AppPaths {
 
 pub fn pglite_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("pglite")
+}
+
+pub fn core_commit_file(data_dir: &Path) -> PathBuf {
+    data_dir.join("core-commit")
+}
+
+pub fn has_parent_component(path: &Path) -> bool {
+    path.components().any(|part| part == Component::ParentDir)
+}
+
+fn resolve(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut base = path;
+    loop {
+        if let Ok(real) = base.canonicalize() {
+            return rest.iter().rev().fold(real, |acc, part| acc.join(part));
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name);
+                base = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+pub fn is_within(dir: &Path, root: &Path) -> bool {
+    resolve(dir).starts_with(resolve(root))
 }
 
 #[derive(Debug, Clone)]

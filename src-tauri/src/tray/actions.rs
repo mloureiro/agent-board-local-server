@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
 use super::menu::{
-    proxy_port, CHECK_WORKER, CONNECT_WORKER, DISCONNECT_WORKER, OPEN_BOARD, OPEN_LOGS,
-    OPEN_SETTINGS, RESTART_SERVER, RESTART_WORKER,
+    proxy_port, BACK_UP_NOW, CHECK_WORKER, CONNECT_WORKER, DISCONNECT_WORKER, OPEN_BOARD,
+    OPEN_LOGS, OPEN_SETTINGS, RESTART_SERVER, RESTART_WORKER,
 };
 use super::open_board::{open_board, open_folder, open_text};
 use crate::activity::{Activity, Kind};
@@ -46,6 +46,14 @@ pub fn handle_click(app: &AppHandle, id: &str, board: &Arc<StatusBoard>) {
         RESTART_SERVER => run_action(app, "Restart server", async move {
             runtime::restart_server(&running).await
         }),
+        BACK_UP_NOW => {
+            let log = app.state::<LogFile>().inner().clone();
+            run_action(app, "Back up now", async move {
+                let written = runtime::back_up_now(&running).await?;
+                log.write(&format!("backup written to {}", written.display()));
+                Ok(())
+            });
+        }
         RESTART_WORKER => run_action(app, "Restart worker", async move {
             runtime::restart_worker(&running).await
         }),

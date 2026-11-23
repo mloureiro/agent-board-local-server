@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::paths::AppPaths;
+use crate::paths::{has_parent_component, is_within, AppPaths};
 
 pub const DEFAULT_PORT: u16 = 4785;
 const MIN_PORT: i64 = 1024;
@@ -21,6 +21,8 @@ pub struct Settings {
     pub port: u16,
     pub start_at_login: bool,
     pub worker_path: Vec<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,6 +33,7 @@ struct RawSettings {
     port: Option<i64>,
     start_at_login: Option<bool>,
     worker_path: Option<Vec<String>>,
+    backup_dir: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -60,7 +63,14 @@ impl Settings {
             port: DEFAULT_PORT,
             start_at_login: true,
             worker_path: Vec::new(),
+            backup_dir: None,
         }
+    }
+
+    pub fn backups_dir(&self, paths: &AppPaths) -> PathBuf {
+        self.backup_dir
+            .clone()
+            .unwrap_or_else(|| paths.default_backups_dir())
     }
 
     /// An existing file is only read: a typo must be fixed by its owner, never overwritten with defaults.
@@ -104,12 +114,18 @@ impl Settings {
             None => defaults.worker_path.clone(),
         };
 
+        let backup_dir = match raw.backup_dir {
+            Some(dir) => Some(validate_backup_dir(dir, &data_dir)?),
+            None => defaults.backup_dir.clone(),
+        };
+
         Ok(Self {
             user_name,
             data_dir,
             port,
             start_at_login: raw.start_at_login.unwrap_or(defaults.start_at_login),
             worker_path,
+            backup_dir,
         })
     }
 }
@@ -134,11 +150,37 @@ fn validate_data_dir(dir: PathBuf) -> Result<PathBuf, SettingsError> {
             reason: "must be an absolute path".into(),
         });
     }
+    if has_parent_component(&dir) {
+        return Err(SettingsError::Invalid {
+            field: "dataDir",
+            reason: "must not contain '..'".into(),
+        });
+    }
     if inside_app_bundle(&dir) {
         return Err(SettingsError::Invalid {
             field: "dataDir",
             reason: "must not be inside an app bundle".into(),
         });
+    }
+    Ok(dir)
+}
+
+fn validate_backup_dir(dir: PathBuf, data_dir: &Path) -> Result<PathBuf, SettingsError> {
+    let invalid = |reason: &str| SettingsError::Invalid {
+        field: "backupDir",
+        reason: reason.into(),
+    };
+    if !dir.is_absolute() {
+        return Err(invalid("must be an absolute path"));
+    }
+    if has_parent_component(&dir) {
+        return Err(invalid("must not contain '..'"));
+    }
+    if inside_app_bundle(&dir) {
+        return Err(invalid("must not be inside an app bundle"));
+    }
+    if is_within(&dir, data_dir) {
+        return Err(invalid("must not be dataDir or inside it"));
     }
     Ok(dir)
 }
@@ -241,6 +283,7 @@ mod tests {
                 port: 5000,
                 start_at_login: true,
                 worker_path: Vec::new(),
+                backup_dir: None,
             }
         );
     }
@@ -256,6 +299,24 @@ mod tests {
             (r#"{"dataDir": "relative/dir"}"#, "dataDir"),
             (
                 r#"{"dataDir": "/Applications/Agent Board Server.app/Contents/data"}"#,
+                "dataDir",
+            ),
+            (r#"{"backupDir": "backups"}"#, "backupDir"),
+            (
+                r#"{"backupDir": "/Applications/Agent Board Server.app/Contents/backups"}"#,
+                "backupDir",
+            ),
+            (r#"{"backupDir": "/root/data"}"#, "backupDir"),
+            (r#"{"backupDir": "/root/data/backups"}"#, "backupDir"),
+            (
+                r#"{"dataDir": "/elsewhere/data", "backupDir": "/elsewhere/data/b"}"#,
+                "backupDir",
+            ),
+            (r#"{"backupDir": "/root/x/../data/pglite/b"}"#, "backupDir"),
+            (r#"{"backupDir": "/elsewhere/../b"}"#, "backupDir"),
+            (r#"{"dataDir": "/root/a/../data"}"#, "dataDir"),
+            (
+                r#"{"dataDir": "/root/a/../data", "backupDir": "/root/data/pglite/b"}"#,
                 "dataDir",
             ),
             (r#"{"workerPath": ["bin"]}"#, "workerPath"),
@@ -279,6 +340,53 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn a_backup_folder_beside_the_data_folder_is_accepted_and_the_default_is_under_the_root() {
+        let paths = AppPaths::new("/root");
+        let sibling =
+            Settings::parse(r#"{"backupDir": "/root/data-backups"}"#, &defaults()).unwrap();
+
+        assert_eq!(
+            sibling.backups_dir(&paths),
+            PathBuf::from("/root/data-backups")
+        );
+        assert_eq!(
+            defaults().backups_dir(&paths),
+            PathBuf::from("/root/backups")
+        );
+    }
+
+    #[test]
+    fn a_backup_folder_that_is_a_symlink_into_the_data_folder_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        fs::create_dir_all(data.join("pglite")).unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(data.join("pglite"), &link).unwrap();
+        let text = format!(
+            r#"{{"dataDir": "{}", "backupDir": "{}"}}"#,
+            data.display(),
+            link.join("b").display()
+        );
+
+        match Settings::parse(&text, &defaults()) {
+            Err(SettingsError::Invalid { field, .. }) => assert_eq!(field, "backupDir"),
+            other => panic!("should be refused on backupDir, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_new_settings_file_does_not_name_the_backup_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path());
+
+        Settings::load_or_create(&paths, "Ines").unwrap();
+
+        assert!(!fs::read_to_string(paths.settings_file())
+            .unwrap()
+            .contains("backupDir"));
     }
 
     #[test]

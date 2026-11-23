@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use super::report::worker_note;
+use crate::localtime::clock;
 use crate::paths::AppPaths;
 use crate::supervisor::process::stop_requested;
 use crate::supervisor::table::{DISPATCH, WORKER, WORKER_LISTEN, WORKER_WATCH};
@@ -91,20 +92,6 @@ impl TickResult {
             Self::TimedOut => format!("stopped after {} s at {at}", TICK_LIMIT.as_secs()),
         }
     }
-}
-
-fn clock() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs()) as libc::time_t;
-    // SAFETY: localtime_r only writes into the struct we pass; both pointers are valid for the call.
-    let local = unsafe {
-        let mut parts: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&seconds, &mut parts);
-        parts
-    };
-    format!("{:02}:{:02}", local.tm_hour, local.tm_min)
 }
 
 struct Running {

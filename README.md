@@ -14,7 +14,7 @@ The app keeps its files under `~/Library/Application Support/dev.mloureiro.agent
 ~/Library/Application Support/dev.mloureiro.agent-board-local-server/
   settings.json    userName, dataDir, port, startAtLogin (read at start, never rewritten)
   app.lock         one app at a time
-  logs/            backend and proxy output
+  logs/            app.log, proxy.log, backend.log, worker-listen.log, worker-watch.log and dispatch.log, each with one previous generation (.log.1)
   run/             pid files of the supervised processes
   data/pglite/     the database (the default dataDir)
   worker/          config/, state/, run/, bin/board, worker-credentials

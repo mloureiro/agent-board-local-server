@@ -4,6 +4,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, RunEvent};
 use tokio::sync::Mutex;
 
+use crate::applog::LogFile;
 use crate::core_build::CoreBuild;
 use crate::enrol_window;
 use crate::lock::{self, LockError};
@@ -32,6 +33,8 @@ pub fn run() {
         }
     };
 
+    let app_log = LogFile::new(paths.log_file("app"));
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             enrol_window::window::enrol_submit,
@@ -45,6 +48,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            app.manage(app_log.clone());
             let keychain = Keychain::for_root(&root);
 
             let resources = Resources::new(app.path().resource_dir().unwrap_or_default());
@@ -93,6 +97,7 @@ pub fn run() {
             });
 
             let signalled = app.handle().clone();
+            let signal_log = app_log.clone();
             tauri::async_runtime::spawn(async move {
                 use tokio::signal::unix::{signal, SignalKind};
                 let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
@@ -100,7 +105,7 @@ pub fn run() {
                     signal(SignalKind::interrupt()),
                     signal(SignalKind::hangup()),
                 ) else {
-                    eprintln!("cannot listen for SIGTERM, SIGINT and SIGHUP");
+                    signal_log.write("cannot listen for SIGTERM, SIGINT and SIGHUP");
                     return;
                 };
                 tokio::select! {
@@ -112,6 +117,7 @@ pub fn run() {
             });
 
             let handle = app.handle().clone();
+            let start_log = app_log.clone();
             let keychain = Arc::new(keychain);
             let worker_secrets = keychain.clone();
             let proxy_secrets = keychain;
@@ -137,10 +143,15 @@ pub fn run() {
                 };
                 match runtime::start(config, proxy_secrets, board.clone()).await {
                     Ok(running) => {
-                        apply_autostart(&handle, &paths, running.settings().start_at_login);
+                        apply_autostart(
+                            &handle,
+                            &paths,
+                            running.settings().start_at_login,
+                            &start_log,
+                        );
                         *startup = Some(running);
                     }
-                    Err(error) => eprintln!("{error}"),
+                    Err(error) => start_log.write(&error.to_string()),
                 }
             });
             Ok(())
@@ -185,7 +196,7 @@ fn quit_app(app: &AppHandle) {
 }
 
 /// A development build would register a login item that points into the build directory.
-fn apply_autostart(app: &AppHandle, paths: &AppPaths, start_at_login: bool) {
+fn apply_autostart(app: &AppHandle, paths: &AppPaths, start_at_login: bool, log: &LogFile) {
     // The login item starts the app without the root variable, so a moved root must not touch it.
     if cfg!(debug_assertions) || AppPaths::default_root().as_deref() != Some(paths.root()) {
         return;
@@ -198,6 +209,6 @@ fn apply_autostart(app: &AppHandle, paths: &AppPaths, start_at_login: bool) {
         launcher.disable()
     };
     if let Err(error) = result {
-        eprintln!("cannot update the login item: {error}");
+        log.write(&format!("cannot update the login item: {error}"));
     }
 }

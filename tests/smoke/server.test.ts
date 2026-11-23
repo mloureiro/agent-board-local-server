@@ -47,6 +47,7 @@ describe('the built backend behind the proxy', () => {
     expect(response.headers.get('content-security-policy')).toBe("sandbox; default-src 'none'");
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
+    expect(readFileSync(join(runner.appRoot, 'logs/app.log'), 'utf8')).toMatch(/Backend running on 127\.0\.0\.1:\d+/);
   });
 
   it('signs the settings user in through the proxy and refuses the backend without the secret', async () => {

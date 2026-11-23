@@ -11,7 +11,7 @@ use http::header::{
     HeaderMap, HeaderValue, ACCEPT_RANGES, ALLOW, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE,
     CONTENT_TYPE, HOST, IF_RANGE, RANGE,
 };
-use http::{Method, Request, Response, StatusCode};
+use http::{Method, Request, Response, StatusCode, Uri};
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
@@ -26,6 +26,7 @@ use super::headers::{apply_data, apply_page, ASSET_CACHE, PAGE_CACHE};
 use super::ranges::{self, Selection};
 use super::static_files::{content_type, Served, StaticFiles};
 use super::upstream::{Body, Upstream};
+use crate::applog::LogFile;
 
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const ACCEPT_RETRY: Duration = Duration::from_millis(100);
@@ -38,6 +39,7 @@ pub struct ProxyConfig {
     pub secret: String,
     pub frontend: PathBuf,
     pub upstream_port: UpstreamPort,
+    pub log: LogFile,
 }
 
 #[derive(Debug)]
@@ -65,6 +67,7 @@ struct State {
     files: StaticFiles,
     upstream: Upstream,
     upstream_port: UpstreamPort,
+    log: LogFile,
 }
 
 pub struct Proxy {
@@ -91,6 +94,7 @@ impl Proxy {
             files: StaticFiles::new(&config.frontend),
             upstream: Upstream::default(),
             upstream_port: config.upstream_port,
+            log: config.log,
         });
         let (stop, stopped) = watch::channel(false);
         let task = tokio::spawn(accept_loop(listener, state, stopped));
@@ -162,9 +166,14 @@ fn finish(mut response: Response<Body>, data: bool) -> Response<Body> {
     response
 }
 
+fn access_line(method: &Method, uri: &Uri, status: StatusCode) -> String {
+    format!("{method} {} {}", uri.path(), status.as_u16())
+}
+
 async fn handle(state: &State, peer: SocketAddr, request: Request<Incoming>) -> Response<Body> {
     let method = request.method().clone();
-    let path = request.uri().path().to_string();
+    let uri = request.uri().clone();
+    let path = uri.path().to_string();
     let data = is_data_path(&path);
 
     let response = match state.guard.check(&method, request.headers()) {
@@ -172,7 +181,9 @@ async fn handle(state: &State, peer: SocketAddr, request: Request<Incoming>) -> 
         Ok(()) if data => forward(state, peer, request).await,
         Ok(()) => serve_static(state, &method, &path, request.headers()).await,
     };
-    eprintln!("{method} {path} {}", response.status().as_u16());
+    state
+        .log
+        .write(&access_line(&method, &uri, response.status()));
     response
 }
 
@@ -344,4 +355,20 @@ fn file_response(
         .headers_mut()
         .insert(CONTENT_LENGTH, HeaderValue::from(length));
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_access_line_holds_the_path_and_never_the_query() {
+        let uri: Uri = "/trpc/task.list?input=%7B%22token%22%3A%22abc%22%7D"
+            .parse()
+            .unwrap();
+
+        let line = access_line(&Method::GET, &uri, StatusCode::OK);
+
+        assert_eq!(line, "GET /trpc/task.list 200");
+    }
 }

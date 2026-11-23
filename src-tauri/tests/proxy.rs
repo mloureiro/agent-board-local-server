@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use agent_board_local_server::applog::LogFile;
 use agent_board_local_server::proxy::headers::{DATA, PAGE};
 use agent_board_local_server::proxy::{Proxy, ProxyConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -129,6 +130,7 @@ impl Fixture {
                 0 => None,
                 port => Some(port),
             }),
+            log: LogFile::new(site.path().join("proxy.log")),
         })
         .await
         .unwrap();
@@ -373,6 +375,7 @@ async fn a_port_that_is_taken_is_reported_with_the_way_out() {
         secret: SECRET.into(),
         frontend: fixture._site.path().to_path_buf(),
         upstream_port: Arc::new(|| None),
+        log: LogFile::new(fixture._site.path().join("other.log")),
     })
     .await
     .err()
@@ -524,4 +527,22 @@ async fn an_if_range_validator_is_never_matched_so_the_whole_file_answers() {
 
     assert_eq!((reply.status, reply.body.as_str()), (200, "console.log(1)"));
     assert_eq!(reply.header("content-range"), None);
+}
+
+#[tokio::test]
+async fn a_request_leaves_one_line_in_the_proxy_log() {
+    let fixture = Fixture::start(0).await;
+    let port = fixture.port();
+
+    let reply = send(port, &get("/assets/app.js?v=1", port)).await;
+    assert_eq!(reply.status, 200);
+
+    let text = std::fs::read_to_string(fixture._site.path().join("proxy.log")).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 1);
+    assert!(
+        lines[0].ends_with(" GET /assets/app.js 200"),
+        "{}",
+        lines[0]
+    );
 }

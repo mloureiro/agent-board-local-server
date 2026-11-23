@@ -11,8 +11,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
-const SECRET: &str = "s3cret-value";
-
 struct Reply {
     status: u16,
     headers: Vec<(String, String)>,
@@ -123,8 +121,6 @@ impl Fixture {
         let lookup = Arc::new(AtomicU16::new(upstream_port));
         let proxy = Proxy::start(ProxyConfig {
             port: 0,
-            user_name: "ines".into(),
-            secret: SECRET.into(),
             frontend,
             upstream_port: Arc::new(move || match lookup.load(Ordering::SeqCst) {
                 0 => None,
@@ -151,15 +147,14 @@ fn page_and_data_names() -> BTreeSet<&'static str> {
 }
 
 #[tokio::test]
-async fn the_backend_receives_the_proxy_sign_in_and_nothing_a_client_claimed() {
+async fn the_backend_gets_no_sign_in_header_and_no_forwarding_a_client_claimed() {
     let backend = stub("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").await;
     let fixture = Fixture::start(backend.port).await;
     let port = fixture.port();
 
     let request = format!(
         "POST /trpc/card.create HTTP/1.1\r\nHost: localhost:{port}\r\nOrigin: http://localhost:{port}\r\n\
-         Remote-User: root\r\nremote-groups: wheel\r\nRemote-Email: x@evil.test\r\n\
-         Board-Proxy-Secret: guess\r\nConnection: close, Remote-User\r\nX-Forwarded-For: 6.6.6.6\r\n\
+         Connection: close, X-Hop\r\nX-Forwarded-For: 6.6.6.6\r\nForwarded: for=6.6.6.6\r\n\
          Authorization: Bearer machine\r\nContent-Length: 0\r\n\r\n"
     );
     let reply = send(port, &request).await;
@@ -168,13 +163,16 @@ async fn the_backend_receives_the_proxy_sign_in_and_nothing_a_client_claimed() {
     let seen = backend.seen.lock().unwrap();
     let head = &seen[0];
     assert!(head.starts_with("post /trpc/card.create http/1.1"));
-    assert_eq!(head.matches("remote-user:").count(), 1);
-    assert!(head.contains("remote-user: ines\r\n"));
-    assert!(head.contains("remote-groups: admins\r\n"));
-    assert!(head.contains(&format!("board-proxy-secret: {SECRET}\r\n")));
     assert!(head.contains("authorization: bearer machine\r\n"));
-    for forged in ["root", "wheel", "x@evil.test", "guess", "6.6.6.6"] {
-        assert!(!head.contains(forged), "{forged} reached the backend");
+    assert!(head.contains("x-forwarded-for: 127.0.0.1\r\n"));
+    assert!(head.contains(&format!("x-forwarded-host: localhost:{port}\r\n")));
+    assert!(
+        !head.contains("6.6.6.6"),
+        "a claimed address reached the backend"
+    );
+    assert!(!head.contains("forwarded: for"));
+    for added in ["remote-user", "remote-groups", "board-proxy-secret"] {
+        assert!(!head.contains(added), "{added} was added");
     }
 }
 
@@ -371,8 +369,6 @@ async fn a_port_that_is_taken_is_reported_with_the_way_out() {
     let fixture = Fixture::start(0).await;
     let error = Proxy::start(ProxyConfig {
         port: fixture.port(),
-        user_name: "ines".into(),
-        secret: SECRET.into(),
         frontend: fixture._site.path().to_path_buf(),
         upstream_port: Arc::new(|| None),
         log: LogFile::new(fixture._site.path().join("other.log")),

@@ -40,6 +40,16 @@ describe('the built backend behind the proxy', () => {
       body: JSON.stringify(input),
     });
 
+  const statusWithHost = (port: number, host: string) =>
+    new Promise<number>((resolve, reject) => {
+      httpRequest({ host: '127.0.0.1', port, path: '/trpc/me', headers: { Host: host } }, (response) => {
+        response.resume();
+        resolve(response.statusCode ?? 0);
+      })
+        .on('error', reject)
+        .end();
+    });
+
   it('answers /healthz through the proxy with the data headers', async () => {
     const response = await fetch(`${base}/healthz`);
 
@@ -51,17 +61,14 @@ describe('the built backend behind the proxy', () => {
     expect(readFileSync(join(runner.appRoot, 'logs/app.log'), 'utf8')).toMatch(/Backend running on 127\.0\.0\.1:\d+/);
   });
 
-  it('signs the settings user in through the proxy and refuses the backend without the secret', async () => {
+  it('signs the settings user in through the proxy and refuses the backend any Host but the proxy origin', async () => {
     const through = await fetch(`${base}/trpc/me`);
     const body = (await through.json()) as { result: { data: { username: string } } };
 
     expect(through.status).toBe(200);
     expect(body.result.data.username).toBe(runner.userName);
-    expect((await fetch(`${direct}/trpc/me`)).status).toBe(403);
-    expect(
-      (await fetch(`${direct}/trpc/me`, { headers: { 'Remote-User': runner.userName, 'Remote-Groups': 'admins' } }))
-        .status,
-    ).toBe(403);
+    expect((await fetch(`${direct}/trpc/me`)).status).toBe(421);
+    expect(await statusWithHost(Number(runner.backendPort), 'evil.test')).toBe(421);
   });
 
   it('serves the machine API to a token issued through tRPC and refuses a call without one', async () => {
@@ -120,19 +127,7 @@ describe('the built backend behind the proxy', () => {
   });
 
   it('refuses a request with a foreign Host end to end', async () => {
-    const status = await new Promise<number>((resolve, reject) => {
-      httpRequest(
-        { host: '127.0.0.1', port: runner.proxyPort, path: '/trpc/me', headers: { Host: 'evil.test' } },
-        (response) => {
-          response.resume();
-          resolve(response.statusCode ?? 0);
-        },
-      )
-        .on('error', reject)
-        .end();
-    });
-
-    expect(status).toBe(421);
+    expect(await statusWithHost(runner.proxyPort, 'evil.test')).toBe(421);
   });
 
   it('keeps the worker in directories of its own and starts none of it before enrolment', () => {

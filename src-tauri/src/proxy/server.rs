@@ -35,8 +35,6 @@ pub type UpstreamPort = Arc<dyn Fn() -> Option<u16> + Send + Sync>;
 
 pub struct ProxyConfig {
     pub port: u16,
-    pub user_name: String,
-    pub secret: String,
     pub frontend: PathBuf,
     pub upstream_port: UpstreamPort,
     pub log: LogFile,
@@ -45,7 +43,6 @@ pub struct ProxyConfig {
 #[derive(Debug)]
 pub enum ProxyError {
     Bind { port: u16, source: io::Error },
-    SignIn,
 }
 
 impl fmt::Display for ProxyError {
@@ -55,7 +52,6 @@ impl fmt::Display for ProxyError {
                 write!(f, "Port {port} in use; change port in settings.json")
             }
             Self::Bind { port, source } => write!(f, "cannot listen on port {port}: {source}"),
-            Self::SignIn => write!(f, "the user name or the secret is not a valid header value"),
         }
     }
 }
@@ -89,8 +85,7 @@ impl Proxy {
             source,
         })?;
         let state = Arc::new(State {
-            guard: Guard::new(local.port(), &config.user_name, &config.secret)
-                .map_err(|_| ProxyError::SignIn)?,
+            guard: Guard::new(local.port()),
             files: StaticFiles::new(&config.frontend),
             upstream: Upstream::default(),
             upstream_port: config.upstream_port,
@@ -196,7 +191,7 @@ async fn forward(
         return answer(StatusCode::BAD_GATEWAY, true);
     };
     let headers = request.headers_mut();
-    state.guard.sign_in(headers);
+    state.guard.strip_forwarding(headers);
     if let Ok(value) = HeaderValue::from_str(&peer.ip().to_string()) {
         headers.insert("x-forwarded-for", value);
     }

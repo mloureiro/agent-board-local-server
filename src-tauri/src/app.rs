@@ -129,9 +129,7 @@ pub fn run() {
             });
 
             let start_log = app_log.clone();
-            let keychain = Arc::new(keychain);
-            let worker_secrets = keychain.clone();
-            let proxy_secrets = keychain;
+            let worker_secrets = Arc::new(keychain);
             tauri::async_runtime::spawn(async move {
                 let mut startup = startup;
                 let exe_dir = std::env::current_exe()
@@ -152,7 +150,7 @@ pub fn run() {
                         }),
                     paths: paths.clone(),
                 };
-                match runtime::start(config, proxy_secrets, board.clone(), activity).await {
+                match runtime::start(config, board.clone(), activity).await {
                     Ok(running) => {
                         apply_autostart(&paths, running.settings().start_at_login, &start_log);
                         *startup = Some(running);

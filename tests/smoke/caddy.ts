@@ -27,15 +27,14 @@ export interface Caddy {
 }
 
 /** The pinned Caddyfile serves the staged frontend and proxies the stub, reached through the host alias instead of the `backend` service name. */
-export async function startCaddy(options: { image: string; stubPort: number; secret: string }): Promise<Caddy> {
+export async function startCaddy(options: { image: string; stubPort: number }): Promise<Caddy> {
   if (spawnSync('docker', ['image', 'inspect', options.image], { stdio: 'ignore' }).status !== 0) {
     docker(['pull', options.image]);
   }
   const caddyfile = readFileSync(pinnedCaddyfile, 'utf8');
-  if (caddyfile.split('backend:4000').length !== 2)
-    throw new Error('The pinned Caddyfile no longer proxies backend:4000 once');
+  if (!caddyfile.includes('backend:4000')) throw new Error('The pinned Caddyfile no longer proxies backend:4000');
   const file = join(scratchDir('abls-caddy-'), 'Caddyfile');
-  writeFileSync(file, caddyfile.replace('backend:4000', `host.docker.internal:${options.stubPort}`));
+  writeFileSync(file, caddyfile.replaceAll('backend:4000', `host.docker.internal:${options.stubPort}`));
 
   const port = await freePort();
   const name = `abls-parity-${port}`;
@@ -49,8 +48,6 @@ export async function startCaddy(options: { image: string; stubPort: number; sec
     `127.0.0.1:${port}:8080`,
     '--add-host',
     'host.docker.internal:host-gateway',
-    '-e',
-    `PROXY_SECRET=${options.secret}`,
     '-v',
     `${file}:/etc/caddy/Caddyfile:ro`,
     '-v',

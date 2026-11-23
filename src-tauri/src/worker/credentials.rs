@@ -254,13 +254,13 @@ mod tests {
     #[test]
     fn forgetting_removes_the_token_and_the_data_key_and_nothing_else() {
         let store = enrolled_store();
-        store.set("proxy-secret", "kept").unwrap();
+        store.set("unrelated", "kept").unwrap();
 
         forget(&store).unwrap();
 
         assert_eq!(store.get(TOKEN_ACCOUNT).unwrap(), None);
         assert_eq!(store.get(DATA_KEY_ACCOUNT).unwrap(), None);
-        assert_eq!(store.get("proxy-secret").unwrap().as_deref(), Some("kept"));
+        assert_eq!(store.get("unrelated").unwrap().as_deref(), Some("kept"));
     }
 
     #[test]

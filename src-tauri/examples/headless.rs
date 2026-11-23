@@ -182,14 +182,7 @@ async fn main() {
     });
 
     let activity = Arc::new(Activity::default());
-    let handle = match runtime::start(
-        config,
-        Arc::new(MemoryStore::default()),
-        board.clone(),
-        activity.clone(),
-    )
-    .await
-    {
+    let handle = match runtime::start(config, board.clone(), activity.clone()).await {
         Ok(handle) => handle,
         Err(error) => {
             eprintln!("{error}");

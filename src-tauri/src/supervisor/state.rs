@@ -19,10 +19,41 @@ pub enum Status {
     },
     NotConnected,
     Note(String),
+    WorkerFailing {
+        kind: WorkerFailure,
+        reason: String,
+    },
     Stopped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerFailure {
+    Refused,
+    Error,
+}
+
+impl WorkerFailure {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Refused => "refused",
+            Self::Error => "error",
+        }
+    }
+}
+
 impl Status {
+    pub fn is_failing(&self) -> bool {
+        matches!(
+            self,
+            Self::Blocked { .. }
+                | Self::Crashed {
+                    restart_in: None,
+                    ..
+                }
+                | Self::WorkerFailing { .. }
+        )
+    }
+
     pub fn label(&self, title: &str) -> String {
         match self {
             Self::Starting => format!("{title}: starting"),
@@ -43,6 +74,7 @@ impl Status {
             Self::Blocked { reason } => format!("{title}: not started ({reason})"),
             Self::NotConnected => "Worker not connected".into(),
             Self::Note(text) => format!("{title}: {text}"),
+            Self::WorkerFailing { kind, reason } => format!("{title}: {} — {reason}", kind.word()),
             Self::Stopped => format!("{title}: stopped"),
         }
     }
@@ -82,5 +114,59 @@ impl StatusBoard {
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.changed.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn crashed(restart_in: Option<Duration>) -> Status {
+        Status::Crashed {
+            reason: "exit 1".into(),
+            restart_in,
+        }
+    }
+
+    #[test]
+    fn only_a_row_that_will_not_recover_by_itself_is_failing() {
+        let failing = [
+            Status::Blocked { reason: "x".into() },
+            crashed(None),
+            Status::WorkerFailing {
+                kind: WorkerFailure::Refused,
+                reason: "x".into(),
+            },
+            Status::WorkerFailing {
+                kind: WorkerFailure::Error,
+                reason: "x".into(),
+            },
+        ];
+        let healthy = [
+            Status::Starting,
+            Status::Running { port: 1 },
+            crashed(Some(Duration::from_secs(2))),
+            Status::NotConnected,
+            Status::Note("ok".into()),
+            Status::Stopped,
+        ];
+
+        assert!(failing.iter().all(Status::is_failing));
+        assert!(!healthy.iter().any(Status::is_failing));
+    }
+
+    #[test]
+    fn a_worker_failure_reads_with_its_kind_and_reason() {
+        let refused = Status::WorkerFailing {
+            kind: WorkerFailure::Refused,
+            reason: "403 forbidden".into(),
+        };
+        let error = Status::WorkerFailing {
+            kind: WorkerFailure::Error,
+            reason: "timed out".into(),
+        };
+
+        assert_eq!(refused.label("Worker"), "Worker: refused — 403 forbidden");
+        assert_eq!(error.label("Worker"), "Worker: error — timed out");
     }
 }

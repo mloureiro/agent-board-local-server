@@ -13,23 +13,30 @@ import {
 } from './core-build-plan.ts';
 
 const expected = { commit: 'a'.repeat(40), bun: '1.2.18', recipe: 'r1' };
+const builtAt = '2026-11-20T08:15:00.000Z';
 const files = { 'binaries/board': 'h1', 'resources/drizzle/0000.sql': 'h2' };
 
 describe('isBuildCurrent', () => {
   it('accepts a build recorded for the pin and the Bun version whose files all match', () => {
-    expect(isBuildCurrent({ ...expected, files }, expected, { ...files })).toBe(true);
+    expect(isBuildCurrent({ ...expected, builtAt, files }, expected, { ...files })).toBe(true);
   });
 
   it.each([
-    ['another core commit', { ...expected, commit: 'b'.repeat(40), files }, files],
-    ['another build recipe', { ...expected, recipe: 'r2', files }, files],
-    ['another Bun version', { ...expected, bun: '1.4.4', files }, files],
-    ['an edited staged file', { ...expected, files }, { ...files, 'binaries/board': 'other' }],
-    ['a deleted staged file', { ...expected, files }, { 'binaries/board': 'h1' }],
-    ['an extra staged file', { ...expected, files }, { ...files, 'resources/extra': 'h3' }],
-    ['no recorded files', { ...expected, files: {} }, {}],
+    ['another core commit', { ...expected, builtAt, commit: 'b'.repeat(40), files }, files],
+    ['another build recipe', { ...expected, builtAt, recipe: 'r2', files }, files],
+    ['another Bun version', { ...expected, builtAt, bun: '1.4.4', files }, files],
+    ['an edited staged file', { ...expected, builtAt, files }, { ...files, 'binaries/board': 'other' }],
+    ['a deleted staged file', { ...expected, builtAt, files }, { 'binaries/board': 'h1' }],
+    ['an extra staged file', { ...expected, builtAt, files }, { ...files, 'resources/extra': 'h3' }],
+    ['no recorded files', { ...expected, builtAt, files: {} }, {}],
   ])('rejects %s', (_name, recorded, actual) => {
     expect(isBuildCurrent(recorded, expected, actual)).toBe(false);
+  });
+
+  it('does not compare when the recorded build was made', () => {
+    expect(isBuildCurrent({ ...expected, builtAt: '2020-01-01T00:00:00.000Z', files }, expected, { ...files })).toBe(
+      true,
+    );
   });
 
   it('rejects a missing manifest', () => {
@@ -55,15 +62,20 @@ describe('needsCheckoutRestore', () => {
 
 describe('parseCoreBuild', () => {
   it('reads what a build writes', () => {
-    expect(parseCoreBuild({ ...expected, files })).toEqual({ ...expected, files });
+    expect(parseCoreBuild({ ...expected, builtAt, files })).toEqual({ ...expected, builtAt, files });
   });
 
-  it.each([null, [], { commit: 'x' }, { ...expected, files: { a: 1 } }, { commit: 'x', bun: '1', files: {} }])(
-    'treats %j as no manifest',
-    (value) => {
-      expect(parseCoreBuild(value)).toBeNull();
-    },
-  );
+  it.each([
+    null,
+    [],
+    { commit: 'x' },
+    { ...expected, builtAt, files: { a: 1 } },
+    { ...expected, files },
+    { ...expected, builtAt: 20261120, files },
+    { commit: 'x', bun: '1', files: {} },
+  ])('treats %j as no manifest', (value) => {
+    expect(parseCoreBuild(value)).toBeNull();
+  });
 });
 
 describe('missingTools', () => {

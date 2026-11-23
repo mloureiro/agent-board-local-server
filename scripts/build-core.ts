@@ -176,7 +176,13 @@ function main(): void {
 
   stage(stageDir, coreDir, serverBinary, join(cliOut, `board-${CLI_TARGET}`));
 
-  const build: CoreBuild = { commit: pin.commit, bun, recipe, files: hashStaged(stageDir) };
+  const build: CoreBuild = {
+    commit: pin.commit,
+    bun,
+    recipe,
+    builtAt: new Date().toISOString(),
+    files: hashStaged(stageDir),
+  };
   writeFileSync(join(stageDir, BUILD_MANIFEST), `${JSON.stringify(build, null, 2)}\n`);
   console.log(`Staged the core at ${pin.commit}`);
 }

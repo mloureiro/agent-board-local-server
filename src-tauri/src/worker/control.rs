@@ -7,10 +7,10 @@ use tokio::sync::Mutex;
 use super::credentials::{discard_pending, enrolled, pending_present};
 use super::enrol::{enrol, BoardInit, EnrolError, InitReport, InitRunner};
 use super::layout;
-use super::processes::{Processes, WorkerSetup, WORKER_LISTEN};
+use super::processes::{Processes, WorkerSetup};
 use super::shutdown::{kill_stragglers, pause_runs};
-use crate::runtime::PROXY;
 use crate::secrets::SecretStore;
+use crate::supervisor::table::{PROXY, WORKER_LISTEN};
 use crate::supervisor::{Status, StatusBoard};
 
 const START_PAUSE_GRACE: Duration = Duration::from_secs(5);

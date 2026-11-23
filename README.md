@@ -36,6 +36,8 @@ Settings keys, all optional: `userName` (default the macOS login name, the board
 
 The app has no window and no Dock icon. The menu has "Open board", one line per process, "Connect worker…" and "Quit"; "Open board" and "Connect worker…" are enabled once the proxy runs. "Open board" hands `http://127.0.0.1:<port>/` to the desktop client (bundle identifier `com.mloureiro.agent-board-client`) when macOS knows an application with that identifier, and otherwise opens it in the default browser. The client does not act on the URL yet, so today it only comes forward. The board's keys live where it is opened: the client and each browser unlock once with the passphrase.
 
+While a row is failing, the menu bar icon carries a `!` mark and its tooltip is that row's line. A row is failing when it is not started, when it crashed and no restart is pending, or when the Worker line shows "refused — …" or "error — …". The first such row in menu order is the one shown, and a restart in progress does not count. The mark and the tooltip clear when every row has recovered. A disabled line near the bottom of the menu reads "core `<7 characters of the pinned commit>` · core built `<date>`", or "core unknown" when the build manifest cannot be read.
+
 ## The worker
 
 The worker is the bundled `board` CLI. The app runs `board internal listen` and `board internal watch` itself and a dispatch tick at start and every two minutes; it installs nothing with launchd. Its files sit apart from the core's defaults, under `worker/`:
@@ -119,7 +121,7 @@ The header-parity test runs the Caddy image named by `ARG CADDY_IMAGE` in the pi
 
 - `src-tauri/binaries/board-server-aarch64-apple-darwin` and `board-aarch64-apple-darwin`, ad-hoc signed because a fresh Bun executable is killed at launch on macOS until it is signed
 - `src-tauri/resources/frontend/`, `drizzle/` and `pglite/` (the three PGlite files the compiled backend cannot find on its own)
-- `src-tauri/resources/core-build.json`: the pin commit, the Bun version and the sha256 of every staged file
+- `src-tauri/resources/core-build.json`: the pin commit, the Bun version, the build time (`builtAt`, UTC) and the sha256 of every staged file
 
 The build refuses a pin whose `apps/frontend/Caddyfile` differs from `core.Caddyfile`, the committed copy the header drift test reads.
 

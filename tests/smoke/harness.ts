@@ -180,9 +180,9 @@ export async function startRunner(
   let backendPort: number | null = null;
   try {
     if (options.upstreamPort === undefined) {
-      backendPort = Number((await wait(/backend running on 127\.0\.0\.1:(\d+)/, 180_000))[1]);
+      backendPort = Number((await wait(/Backend running on 127\.0\.0\.1:(\d+)/, 180_000))[1]);
     }
-    await wait(/proxy running on 127\.0\.0\.1:(\d+)/, 30_000);
+    await wait(/Proxy running on 127\.0\.0\.1:(\d+)/, 30_000);
   } catch (error) {
     child.kill('SIGKILL');
     running.delete(child);

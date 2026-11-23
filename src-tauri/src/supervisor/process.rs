@@ -4,7 +4,7 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::process::{Child, Command};
@@ -27,7 +27,6 @@ pub struct ProcessSpec {
 #[serde(rename_all = "camelCase")]
 pub struct Pidfile {
     pub pid: u32,
-    pub started_at: u64,
     pub argv0: String,
 }
 
@@ -76,9 +75,6 @@ impl RunningProcess {
         let pidfile = paths.pidfile(spec.name);
         Pidfile {
             pid,
-            started_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |elapsed| elapsed.as_secs()),
             argv0: spec.program.to_string_lossy().into_owned(),
         }
         .write(&pidfile)?;

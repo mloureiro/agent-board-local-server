@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use agent_board_local_server::lock::{self, LockError};
 use agent_board_local_server::paths::{AppPaths, Resources, Sidecars, APP_IDENTIFIER};
-use agent_board_local_server::runtime::{self, Config, WorkerConfig, BACKEND, PROXY};
+use agent_board_local_server::runtime::{self, Config, WorkerConfig};
 use agent_board_local_server::secrets::{Keychain, MemoryStore, SecretStore};
-use agent_board_local_server::supervisor::{Status, StatusBoard};
+use agent_board_local_server::supervisor::table::PROXY;
+use agent_board_local_server::supervisor::{changed_labels, Status, StatusBoard};
 use agent_board_local_server::worker::credentials::run_helper_if_requested;
-use agent_board_local_server::worker::processes::{DISPATCH, WORKER, WORKER_LISTEN, WORKER_WATCH};
 use tokio::signal::unix::{signal, SignalKind};
 
 const PACKAGING: &str = env!("CARGO_MANIFEST_DIR");
@@ -149,24 +149,8 @@ async fn main() {
     tokio::spawn(async move {
         let mut printed = BTreeMap::new();
         while changes.changed().await.is_ok() {
-            for (name, title) in [
-                (BACKEND, "backend"),
-                (PROXY, "proxy"),
-                (WORKER, "worker"),
-                (WORKER_LISTEN, "worker listener"),
-                (WORKER_WATCH, "worker watch"),
-                (DISPATCH, "last dispatch tick"),
-            ] {
-                let Some(status) = reporter.get(name) else {
-                    continue;
-                };
-                let line = match status {
-                    Status::Running { port } => format!("{title} running on 127.0.0.1:{port}"),
-                    other => other.label(title),
-                };
-                if printed.insert(name, line.clone()).as_deref() != Some(line.as_str()) {
-                    println!("{line}");
-                }
+            for line in changed_labels(&reporter, &mut printed) {
+                println!("{line}");
             }
         }
     });

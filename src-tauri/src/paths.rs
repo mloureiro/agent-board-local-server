@@ -144,6 +144,10 @@ impl Resources {
         self.root.join("resources/frontend")
     }
 
+    pub fn core_build(&self) -> PathBuf {
+        self.root.join("resources/core-build.json")
+    }
+
     pub fn pglite_assets(&self) -> PathBuf {
         self.root.join("resources/pglite")
     }

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use super::enrol::scrub;
 use super::processes::TickResult;
+use crate::supervisor::{Status, WorkerFailure};
 
 const TAIL_BYTES: u64 = 8 * 1024;
 const REASON_LIMIT: usize = 160;
@@ -51,20 +52,29 @@ fn is_refusal(reason: &str) -> bool {
         .any(|word| REFUSAL_WORDS.contains(&word))
 }
 
-pub fn worker_note(result: &TickResult, log: &Path) -> Option<String> {
+pub fn worker_note(result: &TickResult, log: &Path) -> Option<Status> {
+    let failing = |kind, reason: &str| {
+        Some(Status::WorkerFailing {
+            kind,
+            reason: reason.into(),
+        })
+    };
     match result {
-        TickResult::Ok => Some("ok".into()),
+        TickResult::Ok => Some(Status::Note("ok".into())),
         TickResult::Failed(_) => {
             let reason = failure_reason(&read_tail(log))
                 .unwrap_or_else(|| "the dispatch tick failed".into());
             let kind = if is_refusal(&reason) {
-                "refused"
+                WorkerFailure::Refused
             } else {
-                "error"
+                WorkerFailure::Error
             };
-            Some(format!("{kind} — {reason}"))
+            failing(kind, &reason)
         }
-        TickResult::TimedOut => Some("error — the dispatch tick did not finish in time".into()),
+        TickResult::TimedOut => failing(
+            WorkerFailure::Error,
+            "the dispatch tick did not finish in time",
+        ),
         TickResult::LockHeld | TickResult::Killed(_) => None,
     }
 }
@@ -73,11 +83,18 @@ pub fn worker_note(result: &TickResult, log: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn note(result: &TickResult, log: &str) -> Option<String> {
+    fn note(result: &TickResult, log: &str) -> Option<Status> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dispatch.log");
         std::fs::write(&path, log).unwrap();
         worker_note(result, &path)
+    }
+
+    fn failing(kind: WorkerFailure, reason: &str) -> Option<Status> {
+        Some(Status::WorkerFailing {
+            kind,
+            reason: reason.into(),
+        })
     }
 
     #[test]
@@ -86,8 +103,11 @@ mod tests {
             "STARTED t1 prompt lane=main\nagent-board: this token belongs to tnk_one, not mac\n";
 
         assert_eq!(
-            note(&TickResult::Failed(1), log).as_deref(),
-            Some("refused — this token belongs to tnk_one, not mac")
+            note(&TickResult::Failed(1), log),
+            failing(
+                WorkerFailure::Refused,
+                "this token belongs to tnk_one, not mac"
+            )
         );
     }
 
@@ -96,8 +116,11 @@ mod tests {
         let log = "agent-board: fetch failed: connect ECONNREFUSED 127.0.0.1:4785\n";
 
         assert_eq!(
-            note(&TickResult::Failed(1), log).as_deref(),
-            Some("error — fetch failed: connect ECONNREFUSED 127.0.0.1:4785")
+            note(&TickResult::Failed(1), log),
+            failing(
+                WorkerFailure::Error,
+                "fetch failed: connect ECONNREFUSED 127.0.0.1:4785"
+            )
         );
     }
 
@@ -106,36 +129,42 @@ mod tests {
         let log = "agent-board: the token was refused (401)\n    at something\n";
 
         assert_eq!(
-            note(&TickResult::Failed(1), log).as_deref(),
-            Some("refused — the token was refused (401)")
+            note(&TickResult::Failed(1), log),
+            failing(WorkerFailure::Refused, "the token was refused (401)")
         );
     }
 
     #[test]
     fn a_failed_tick_with_an_empty_log_still_says_so() {
         assert_eq!(
-            note(&TickResult::Failed(1), "").as_deref(),
-            Some("error — the dispatch tick failed")
+            note(&TickResult::Failed(1), ""),
+            failing(WorkerFailure::Error, "the dispatch tick failed")
         );
     }
 
     #[test]
     fn a_good_tick_clears_the_error_and_a_tick_that_told_nothing_leaves_it() {
-        assert_eq!(note(&TickResult::Ok, "").as_deref(), Some("ok"));
+        assert_eq!(note(&TickResult::Ok, ""), Some(Status::Note("ok".into())));
         assert_eq!(note(&TickResult::LockHeld, "agent-board: x"), None);
         assert_eq!(note(&TickResult::Killed(9), "agent-board: x"), None);
-        assert!(note(&TickResult::TimedOut, "")
-            .unwrap()
-            .starts_with("error"));
+        assert_eq!(
+            note(&TickResult::TimedOut, ""),
+            failing(
+                WorkerFailure::Error,
+                "the dispatch tick did not finish in time"
+            )
+        );
     }
 
     #[test]
     fn a_secret_in_a_log_line_is_withheld() {
         let log = "agent-board: refused abm_abcdefghijklmnop\n";
 
-        let shown = note(&TickResult::Failed(1), log).unwrap();
+        let Some(Status::WorkerFailing { reason, .. }) = note(&TickResult::Failed(1), log) else {
+            panic!("expected a failing worker");
+        };
 
-        assert!(!shown.contains("abcdefgh"));
+        assert!(!reason.contains("abcdefgh"));
     }
 
     #[test]
@@ -144,8 +173,8 @@ mod tests {
         log.push_str("\nagent-board: 403 forbidden\n");
 
         assert_eq!(
-            note(&TickResult::Failed(1), &log).as_deref(),
-            Some("refused — 403 forbidden")
+            note(&TickResult::Failed(1), &log),
+            failing(WorkerFailure::Refused, "403 forbidden")
         );
     }
 }

@@ -4,14 +4,14 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, RunEvent};
 use tokio::sync::Mutex;
 
+use crate::core_build::CoreBuild;
 use crate::enrol_window;
 use crate::lock::{self, LockError};
 use crate::paths::{AppPaths, Resources, Sidecars};
 use crate::runtime::{self, Config, Running, WorkerConfig};
 use crate::secrets::Keychain;
-use crate::settings::Settings;
 use crate::supervisor::StatusBoard;
-use crate::tray::{handle_click, TrayMenu, QUIT};
+use crate::tray::{first_failing, handle_click, show_health, TrayMenu, QUIT};
 
 fn login_name() -> String {
     std::env::var("USER").unwrap_or_else(|_| "user".into())
@@ -47,7 +47,11 @@ pub fn run() {
 
             let keychain = Keychain::for_root(&root);
 
-            let tray_menu = Arc::new(TrayMenu::build(app.handle())?);
+            let resources = Resources::new(app.path().resource_dir().unwrap_or_default());
+            let tray_menu = Arc::new(TrayMenu::build(
+                app.handle(),
+                CoreBuild::read(&resources.core_build()).as_ref(),
+            )?);
 
             let board = Arc::new(StatusBoard::default());
             let running: Running = Arc::new(Mutex::new(None));
@@ -60,7 +64,7 @@ pub fn run() {
             enrol_window::manage(app.handle(), running.clone());
 
             let clicked_board = board.clone();
-            TrayIconBuilder::new()
+            let tray_icon = TrayIconBuilder::new()
                 .icon(tauri::include_image!("icons/tray.png"))
                 .icon_as_template(true)
                 .tooltip("agent-board local server")
@@ -77,8 +81,14 @@ pub fn run() {
             let mut changes = board.subscribe();
             let reader = board.clone();
             tauri::async_runtime::spawn(async move {
+                let mut shown = None;
                 while changes.changed().await.is_ok() {
                     tray_menu.refresh(&reader);
+                    let failing = first_failing(&reader);
+                    if failing != shown {
+                        show_health(&tray_icon, failing.as_deref());
+                        shown = failing;
+                    }
                 }
             });
 
@@ -107,14 +117,13 @@ pub fn run() {
             let proxy_secrets = keychain;
             tauri::async_runtime::spawn(async move {
                 let mut startup = startup;
-                let resources = handle.path().resource_dir().unwrap_or_default();
                 let exe_dir = std::env::current_exe()
                     .ok()
                     .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
                     .unwrap_or_default();
                 let config = Config {
                     sidecars: Sidecars::beside(&exe_dir),
-                    resources: Resources::new(resources),
+                    resources,
                     login_name: login_name(),
                     port_override: None,
                     upstream_override: None,
@@ -128,7 +137,7 @@ pub fn run() {
                 };
                 match runtime::start(config, proxy_secrets, board.clone()).await {
                     Ok(running) => {
-                        apply_autostart(&handle, &paths);
+                        apply_autostart(&handle, &paths, running.settings().start_at_login);
                         *startup = Some(running);
                     }
                     Err(error) => eprintln!("{error}"),
@@ -176,17 +185,14 @@ fn quit_app(app: &AppHandle) {
 }
 
 /// A development build would register a login item that points into the build directory.
-fn apply_autostart(app: &AppHandle, paths: &AppPaths) {
+fn apply_autostart(app: &AppHandle, paths: &AppPaths, start_at_login: bool) {
     // The login item starts the app without the root variable, so a moved root must not touch it.
     if cfg!(debug_assertions) || AppPaths::default_root().as_deref() != Some(paths.root()) {
         return;
     }
     use tauri_plugin_autostart::ManagerExt;
-    let Ok(settings) = Settings::load_or_create(paths, &login_name()) else {
-        return;
-    };
     let launcher = app.autolaunch();
-    let result = if settings.start_at_login {
+    let result = if start_at_login {
         launcher.enable()
     } else {
         launcher.disable()

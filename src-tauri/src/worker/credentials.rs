@@ -119,13 +119,11 @@ pub fn helper_output(store: &dyn SecretStore, pair: Pair) -> Result<String, Help
 
 pub const CONFIG_DIR_ENV: &str = "AGENT_BOARD_CONFIG_DIR";
 
-/// The worker's config directory sits two levels under the app root.
 pub fn root_of_config_dir(config_dir: Option<OsString>) -> Option<PathBuf> {
     let config_dir = PathBuf::from(config_dir?);
     Some(config_dir.parent()?.parent()?.to_path_buf())
 }
 
-/// The Keychain the CLI's credentials command reads, named by the worker environment; nothing without it.
 pub fn helper_keychain() -> Option<Keychain> {
     root_of_config_dir(std::env::var_os(CONFIG_DIR_ENV)).map(|root| Keychain::for_root(&root))
 }

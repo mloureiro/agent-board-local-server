@@ -43,7 +43,7 @@ Builds are local. `pnpm build` signs the `.app` and both bundled sidecars (`boar
 3. Set the validity to a long period (3650 days), accept the other defaults, and keep the login keychain as the location.
 4. Build with the certificate's name: `APPLE_SIGNING_IDENTITY="Agent Board Local Signing" pnpm build`.
 
-The first signed build prompts once for each Keychain item; choose "Always Allow". A later build signed with the same identity, installed over the previous one, reads the items without a prompt. Replacing the identity (an expired certificate, a new name) is a new code identity and prompts once again. `pnpm acceptance` reports the signer of the app and of both sidecars and fails when they differ.
+The first signed build prompts once for each Keychain item; choose "Always Allow". A later build signed with the same identity, installed over the previous one, reads the items without a prompt. Replacing the identity (an expired certificate, a new name) is a new code identity and prompts once again. `pnpm acceptance` reports the signer of the app and of both sidecars and fails when they differ. The first signed build may also ask once for codesign access to the new private key, separate from the runtime Keychain prompts.
 
 ## The tray
 

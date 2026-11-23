@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 
 use crate::lock::{self, LockError};
 use crate::login_item;
-use crate::paths::{is_within, AppPaths, APP_IDENTIFIER};
+use crate::paths::{has_parent_component, is_within, resolve, AppPaths, APP_IDENTIFIER};
 use crate::secrets::{Keychain, SecretStore, ACCOUNTS};
 use crate::settings::Settings;
 
@@ -50,7 +50,12 @@ pub struct Inputs<'a> {
 }
 
 fn deletable(root: &Path, home: Option<&Path>) -> bool {
-    root.parent().is_some() && home.is_none_or(|home| !home.starts_with(root))
+    let bare: PathBuf = root.components().collect();
+    let is_link = fs::symlink_metadata(&bare).is_ok_and(|meta| meta.is_symlink());
+    !has_parent_component(root)
+        && !is_link
+        && resolve(root).parent().is_some()
+        && home.is_none_or(|home| !is_within(home, root))
 }
 
 pub fn plan(inputs: &Inputs) -> Vec<Step> {
@@ -72,7 +77,7 @@ pub fn plan(inputs: &Inputs) -> Vec<Step> {
     }
     if !deletable(inputs.root, inputs.home) {
         steps.push(Step::Note(format!(
-            "{} is not removed: it holds the home folder or is a filesystem root",
+            "{} is not removed: it is a symlink, has a .. component, holds the home folder or is a filesystem root",
             inputs.root.display()
         )));
         return steps;
@@ -148,7 +153,10 @@ pub fn execute(steps: &[Step], env: &Env) -> Report {
                 }
             }
             Step::RemoveAppFolder(folder) => match remove_folder(folder) {
-                Ok(()) => report.lines.push(format!("{} removed", folder.display())),
+                Ok(true) => report.lines.push(format!("{} removed", folder.display())),
+                Ok(false) => report
+                    .lines
+                    .push(format!("{} was not there", folder.display())),
                 Err(error) => fail(
                     &mut report,
                     format!("{} not removed: {error}", folder.display()),
@@ -165,10 +173,11 @@ fn fail(report: &mut Report, line: String) {
     report.ok = false;
 }
 
-fn remove_folder(folder: &Path) -> io::Result<()> {
+fn remove_folder(folder: &Path) -> io::Result<bool> {
     match fs::remove_dir_all(folder) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-        _ => Ok(()),
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -203,7 +212,6 @@ pub fn run(options: Options) -> i32 {
         return 1;
     };
     let paths = AppPaths::new(&root);
-    // An absent root has nothing to lock, and taking the lock would create it.
     let (running, _lock) = if root.exists() {
         match lock::acquire(&paths.lock_file()) {
             Ok(held) => (false, Some(held)),
@@ -394,6 +402,64 @@ mod tests {
                 "{root}"
             );
         }
+    }
+
+    fn removes_folder(root: &Path, home: &Path) -> bool {
+        let mut wanted = inputs(root, None);
+        wanted.home = Some(home);
+        wanted.delete_data = true;
+        plan(&wanted)
+            .iter()
+            .any(|step| matches!(step, Step::RemoveAppFolder(_)))
+    }
+
+    #[test]
+    fn a_root_is_judged_on_its_resolved_path_against_the_resolved_home() {
+        let scratch = tempfile::tempdir().unwrap();
+        let home = scratch.path().join("home");
+        let root = home.join("app");
+        fs::create_dir_all(&root).unwrap();
+        let alias = scratch.path().join("alias");
+        std::os::unix::fs::symlink(&home, &alias).unwrap();
+        let link_to_app = scratch.path().join("app-link");
+        std::os::unix::fs::symlink(&root, &link_to_app).unwrap();
+        let elsewhere = scratch.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+
+        assert!(removes_folder(&elsewhere, &home));
+        assert!(removes_folder(&root, &home));
+        assert!(!removes_folder(&home.join("app/.."), &home));
+        assert!(!removes_folder(&home.join("x/.."), &home));
+        assert!(!removes_folder(&alias, &home));
+        assert!(!removes_folder(&alias.join(""), &home));
+        let mut slashed = alias.into_os_string();
+        slashed.push("/");
+        assert!(!removes_folder(Path::new(&slashed), &home));
+        assert!(!removes_folder(&link_to_app, &home));
+        assert!(!removes_folder(&home, &home));
+        assert!(!removes_folder(scratch.path(), &home));
+        assert!(!removes_folder(Path::new("/"), &home));
+    }
+
+    #[test]
+    fn a_folder_that_was_not_there_is_not_reported_as_removed() {
+        let scratch = tempfile::tempdir().unwrap();
+        let agents = scratch.path().join("LaunchAgents");
+        let store = MemoryStore::default();
+        let env = Env {
+            launch_agents: &agents,
+            store: &store,
+            boot_out: &|| {},
+        };
+        let missing = scratch.path().join("gone");
+
+        let report = execute(&[Step::RemoveAppFolder(missing.clone())], &env);
+
+        assert!(report.ok);
+        assert_eq!(
+            report.lines,
+            vec![format!("{} was not there", missing.display())]
+        );
     }
 
     #[test]

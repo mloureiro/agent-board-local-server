@@ -133,7 +133,6 @@ export interface Runner {
   userName: string;
   output: () => string;
   tree: () => number[];
-  /** SIGKILLs the runner alone and resolves with the pids of its tree taken just before, so its children are orphaned. */
   kill: () => Promise<number[]>;
   stop: () => Promise<void>;
 }

@@ -118,7 +118,7 @@ pub fn has_parent_component(path: &Path) -> bool {
     path.components().any(|part| part == Component::ParentDir)
 }
 
-fn resolve(path: &Path) -> PathBuf {
+pub fn resolve(path: &Path) -> PathBuf {
     let mut rest = Vec::new();
     let mut base = path;
     loop {

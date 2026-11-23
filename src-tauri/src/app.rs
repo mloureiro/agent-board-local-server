@@ -89,7 +89,10 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let mut shown = None;
                 loop {
-                    tray_menu.refresh(&reader, busy.borrow_and_update().is_some());
+                    // The borrow holds the channel's read lock; refresh waits on the main thread, which can be
+                    // sending on the same channel (Quit), so the lock must be released before it.
+                    let working = busy.borrow_and_update().is_some();
+                    tray_menu.refresh(&reader, working);
                     let failing = first_failing(&reader);
                     if failing != shown {
                         show_health(&tray_icon, failing.as_deref());

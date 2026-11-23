@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::paths::AppPaths;
 
@@ -10,10 +10,16 @@ const INHERITED: [&str; 6] = ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LAN
 pub fn environment(
     paths: &AppPaths,
     credentials_command: &Path,
+    worker_path: &[PathBuf],
     app_env: &dyn Fn(&str) -> Option<String>,
 ) -> BTreeMap<String, String> {
     let home = app_env("HOME");
     let mut path = vec![paths.worker_bin_dir().to_string_lossy().into_owned()];
+    path.extend(
+        worker_path
+            .iter()
+            .map(|entry| entry.to_string_lossy().into_owned()),
+    );
     if let Some(home) = &home {
         path.push(format!("{home}/.local/bin"));
     }
@@ -58,8 +64,6 @@ pub fn environment(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
 
     #[test]
@@ -80,7 +84,12 @@ mod tests {
         ]);
         let app = PathBuf::from("/App/Contents/MacOS/agent-board-local-server");
 
-        let env = environment(&paths, &app, &|name| {
+        let extra = [
+            PathBuf::from("/opt/tools/bin"),
+            PathBuf::from("/Users/ines/bin"),
+        ];
+
+        let env = environment(&paths, &app, &extra, &|name| {
             host.get(name).map(|v| (*v).to_owned())
         });
 
@@ -92,7 +101,7 @@ mod tests {
                     (
                         "PATH",
                         format!(
-                            "{root}/bin:/Users/ines/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                            "{root}/bin:/opt/tools/bin:/Users/ines/bin:/Users/ines/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
                         )
                     ),
                     ("AGENT_BOARD_CONFIG_DIR", format!("{root}/config")),

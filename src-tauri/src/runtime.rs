@@ -15,7 +15,7 @@ use crate::secrets::{proxy_secret, SecretError, SecretStore};
 use crate::settings::{Settings, SettingsError};
 use crate::supervisor::orphans;
 use crate::supervisor::process::stop_requested;
-use crate::supervisor::table::{changed_labels, BACKEND, PROXY, WORKER_LISTEN};
+use crate::supervisor::table::{changed_labels, BACKEND, PROXY, WORKER, WORKER_LISTEN};
 use crate::supervisor::{
     supervise, Control, Launcher, ProcessSpec, RunningProcess, Spawned, Status, StatusBoard,
 };
@@ -106,6 +106,13 @@ impl Handle {
     }
 }
 
+pub async fn check_worker(running: &Running, board: &StatusBoard) -> Option<PathBuf> {
+    let worker = running.lock().await.as_ref()?.worker()?;
+    let problems = worker.check().await;
+    board.set(WORKER, Status::Note(format!("check: {problems} problems")));
+    Some(worker.check_log())
+}
+
 pub async fn start(
     config: Config,
     secrets: Arc<dyn SecretStore>,
@@ -140,7 +147,7 @@ pub async fn start(
     ));
 
     let worker = match (&config.worker, config.upstream_override) {
-        (Some(worker), None) => prepare_worker(&config, worker, &board),
+        (Some(worker), None) => prepare_worker(&config, worker, &settings.worker_path, &board),
         _ => None,
     };
 
@@ -199,14 +206,18 @@ pub async fn start(
 fn prepare_worker(
     config: &Config,
     worker: &WorkerConfig,
+    worker_path: &[PathBuf],
     board: &Arc<StatusBoard>,
 ) -> Option<Arc<WorkerControl>> {
     let setup = WorkerSetup {
         paths: config.paths.clone(),
         board: config.paths.worker_board(),
-        env: worker_env::environment(&config.paths, &config.paths.worker_credentials(), &|name| {
-            std::env::var(name).ok()
-        }),
+        env: worker_env::environment(
+            &config.paths,
+            &config.paths.worker_credentials(),
+            worker_path,
+            &|name| std::env::var(name).ok(),
+        ),
         lockf: PathBuf::from("/usr/bin/lockf"),
     };
     let control = Arc::new(WorkerControl::new(

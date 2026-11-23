@@ -6,21 +6,21 @@ It packages the agent-board core at the commit named in `core.pin.json` and hold
 
 Today the app starts the backend (PGlite in process, loopback only) as a supervised sidecar, serves the board through its own proxy and, once enrolled, runs the worker. A crashed process is restarted after 1 s, 5 s and 25 s; a fourth crash without a stable run in between leaves it down, and the count goes back to zero after 10 minutes up. A backend that stops answering its health check three times in a row (checked every 60 s) is treated as crashed. The tray shows the state of each process and stops everything on Quit, on SIGTERM, SIGINT and SIGHUP, and on any other exit of the app (the system ending it at log out, for one) that still finds something running.
 
-The app keeps its files under `~/Library/Application Support/dev.mloureiro.agent-board-local-server/`: `settings.json` (`userName`, `dataDir`, `port`, `startAtLogin`; read at start and never rewritten), `logs/`, `run/`, `worker/` and the data folder. The proxy secret, the machine token and the data key live in the login Keychain and nowhere else. `cargo run --example headless -- --app-root <dir>` runs the same runtime without the tray until SIGTERM.
+The app keeps its files under `~/Library/Application Support/dev.mloureiro.agent-board-local-server/`: `settings.json` (`userName`, `dataDir`, `port`, `startAtLogin`, `workerPath`; read at start and never rewritten), `logs/`, `run/`, `worker/` and the data folder. The proxy secret, the machine token and the data key live in the login Keychain and nowhere else. `cargo run --example headless -- --app-root <dir>` runs the same runtime without the tray until SIGTERM.
 
 ## On disk, keys and what is stored in plain form
 
 ```
 ~/Library/Application Support/dev.mloureiro.agent-board-local-server/
-  settings.json    userName, dataDir, port, startAtLogin (read at start, never rewritten)
+  settings.json    userName, dataDir, port, startAtLogin, workerPath (read at start, never rewritten)
   app.lock         one app at a time
-  logs/            app.log, proxy.log, backend.log, worker-listen.log, worker-watch.log and dispatch.log, each with one previous generation (.log.1)
+  logs/            app.log, proxy.log, backend.log, worker-listen.log, worker-watch.log and dispatch.log, each with one previous generation (.log.1), and worker-check.log (replaced by each check)
   run/             pid files of the supervised processes
   data/pglite/     the database (the default dataDir)
-  worker/          config/, state/, run/, bin/board, worker-credentials
+  worker/          config/, state/, run/, bin/board, bin/board-local, worker-credentials
 ```
 
-Settings keys, all optional: `userName` (default the macOS login name, the board user), `dataDir` (default `data/` under the app folder), `port` (default 4785; it is part of the origin the browser keeps its keys under, so it should not change), `startAtLogin` (default true; the release build registers a login item, a debug build never does). A malformed or out-of-range value stops the app with a message instead of being replaced by a default.
+Settings keys, all optional: `userName` (default the macOS login name, the board user), `dataDir` (default `data/` under the app folder), `port` (default 4785; it is part of the origin the browser keeps its keys under, so it should not change), `startAtLogin` (default true; the release build registers a login item, a debug build never does), `workerPath` (default empty; a list of absolute directories that go on the worker's `PATH`, see "The worker"). A malformed or out-of-range value stops the app with a message instead of being replaced by a default. A key the build does not know stops it too, so an older build refuses a `settings.json` that holds a key added by a newer one. `settings.json` is read once, at start: after a change, Quit and open the app again.
 
 `AGENT_BOARD_LOCAL_SERVER_ROOT` moves the whole app folder, for running a build beside an installed one. Any root other than the default also gets its own Keychain service and leaves the login item alone.
 
@@ -34,7 +34,7 @@ Settings keys, all optional: `userName` (default the macOS login name, the board
 
 ## The tray
 
-The app has no window and no Dock icon. The menu has "Open board", one line per process, "Connect worker…" and "Quit"; "Open board" and "Connect worker…" are enabled once the proxy runs. "Open board" hands `http://127.0.0.1:<port>/` to the desktop client (bundle identifier `com.mloureiro.agent-board-client`) when macOS knows an application with that identifier, and otherwise opens it in the default browser. The client does not act on the URL yet, so today it only comes forward. The board's keys live where it is opened: the client and each browser unlock once with the passphrase.
+The app has no window and no Dock icon. The menu has "Open board", one line per process, "Connect worker…", "Check worker" and "Quit"; "Open board" and "Connect worker…" are enabled once the proxy runs, and "Check worker" once the worker is connected. "Open board" hands `http://127.0.0.1:<port>/` to the desktop client (bundle identifier `com.mloureiro.agent-board-client`) when macOS knows an application with that identifier, and otherwise opens it in the default browser. The client does not act on the URL yet, so today it only comes forward. The board's keys live where it is opened: the client and each browser unlock once with the passphrase.
 
 While a row is failing, the menu bar icon carries a `!` mark and its tooltip is that row's line. A row is failing when it is not started, when it crashed and no restart is pending, or when the Worker line shows "refused — …" or "error — …". The first such row in menu order is the one shown, and a restart in progress does not count. The mark and the tooltip clear when every row has recovered. A disabled line near the bottom of the menu reads "core `<7 characters of the pinned commit>` · core built `<date>`", or "core unknown" when the build manifest cannot be read.
 
@@ -46,7 +46,11 @@ The worker is the bundled `board` CLI. The app runs `board internal listen` and 
 - `worker/bin/board`, a link to the bundled CLI that comes first on the worker's `PATH`
 - `worker/worker-credentials`, a link to the app's own executable. The CLI runs it as `AGENT_BOARD_CREDENTIALS_COMMAND`; it prints the token and the data key from the Keychain and nothing else, so neither is ever in a file or a process argument.
 
-The `PATH` the worker gets is written out by the app (`worker/bin`, `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and the system directories), so `claude` and `gh` are found when the app is started from Finder.
+The `PATH` the worker gets is written out by the app: `worker/bin`, then the directories of the `workerPath` setting in the order they are listed, then `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and the system directories. `claude` and `gh` are found when the app is started from Finder, and a tool installed elsewhere (a version manager's shims, for example) is reached by listing its directory in `workerPath`:
+
+```json
+{ "workerPath": ["/Users/ines/.local/share/mise/shims"] }
+```
 
 Until the machine is enrolled the tray shows "Worker not connected". "Connect worker…" (later "Reconnect worker…") opens a small window of the app's own, with the machine token and the data key from the board's Settings page in two masked fields, each drawn with one dot per character (a count under each field says how many characters it holds). There is no machine-name field: the board names the machine after the token. "Connect" disables the form and shows "Connecting…"; the window stays open until the board has answered. On success it says "Connected as <machine name>" with a Close button; on a refusal it stays on the form with the reason (token refused, data key not the board's, board unreachable) and nothing is stored. Cancel stores nothing, the window cannot be closed while the board is being asked, and Quit closes it and exits.
 
@@ -66,13 +70,19 @@ cargo run --example headless -- --app-root <dir> --port <port> --enrol-from-stdi
 
 On Quit the dispatch tick, the listener and the watch unit get SIGTERM, then the running cards are asked to pause through `board internal shutdown --grace 20`, which leaves them resumable on this machine, then any worker still left is killed, and only then do the proxy and the backend stop. The whole sequence takes about a minute at most.
 
-To use the bundled CLI by hand (to add directories or lanes, for example), give it the worker's directories and the credentials link:
+To use the bundled CLI by hand (to add directories or lanes, for example), run `worker/bin/board-local` by its full path. It gives the CLI the worker's directories and the credentials link, keeps the `PATH` of the terminal it runs in, and refuses `setup`, `self-update`, `restart` and `init`, which would change what the app supervises:
 
 ```sh
-R="$HOME/Library/Application Support/dev.mloureiro.agent-board-local-server/worker"
-AGENT_BOARD_CONFIG_DIR="$R/config" AGENT_BOARD_STATE_DIR="$R/state" AGENT_BOARD_RUN_DIR="$R/run" \
-  AGENT_BOARD_CREDENTIALS_COMMAND="$R/worker-credentials" "$R/bin/board" dirs
+"$HOME/Library/Application Support/dev.mloureiro.agent-board-local-server/worker/bin/board-local" dirs
 ```
+
+To type `board-local` alone, link it into a directory on your `PATH`:
+
+```sh
+ln -s "$HOME/Library/Application Support/dev.mloureiro.agent-board-local-server/worker/bin/board-local" ~/.local/bin/board-local
+```
+
+"Check worker" in the tray runs the bundled `board doctor --json` with the worker's environment, leaves out the checks that do not apply to a worker the app supervises (launchd agents and the core's own lookup of tools), and looks up `claude` and `gh` itself on the worker's `PATH`, `workerPath` included. The result goes to `logs/worker-check.log`, which the app opens, and the Worker line shows "check: N problems". The item is enabled once the worker is connected; the next dispatch tick replaces the Worker line.
 
 ## Requirements
 

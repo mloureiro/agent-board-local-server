@@ -11,6 +11,7 @@ pub const DEFAULT_PORT: u16 = 4785;
 const MIN_PORT: i64 = 1024;
 const MAX_PORT: i64 = 65535;
 const MAX_USER_NAME: usize = 64;
+const MAX_WORKER_PATH: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +20,7 @@ pub struct Settings {
     pub data_dir: PathBuf,
     pub port: u16,
     pub start_at_login: bool,
+    pub worker_path: Vec<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,6 +30,7 @@ struct RawSettings {
     data_dir: Option<PathBuf>,
     port: Option<i64>,
     start_at_login: Option<bool>,
+    worker_path: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -56,6 +59,7 @@ impl Settings {
             data_dir: paths.default_data_dir(),
             port: DEFAULT_PORT,
             start_at_login: true,
+            worker_path: Vec::new(),
         }
     }
 
@@ -95,11 +99,17 @@ impl Settings {
             None => defaults.port,
         };
 
+        let worker_path = match raw.worker_path {
+            Some(entries) => validate_worker_path(entries)?,
+            None => defaults.worker_path.clone(),
+        };
+
         Ok(Self {
             user_name,
             data_dir,
             port,
             start_at_login: raw.start_at_login.unwrap_or(defaults.start_at_login),
+            worker_path,
         })
     }
 }
@@ -131,6 +141,27 @@ fn validate_data_dir(dir: PathBuf) -> Result<PathBuf, SettingsError> {
         });
     }
     Ok(dir)
+}
+
+fn validate_worker_path(entries: Vec<String>) -> Result<Vec<PathBuf>, SettingsError> {
+    let invalid = |reason: &str| SettingsError::Invalid {
+        field: "workerPath",
+        reason: reason.into(),
+    };
+    if entries.len() > MAX_WORKER_PATH {
+        return Err(invalid("must hold at most 32 entries"));
+    }
+    for entry in &entries {
+        if !Path::new(entry).is_absolute() {
+            return Err(invalid("entries must be absolute paths"));
+        }
+        if entry.contains(':') || entry.chars().any(char::is_control) {
+            return Err(invalid(
+                "entries must not contain ':' or a control character",
+            ));
+        }
+    }
+    Ok(entries.into_iter().map(PathBuf::from).collect())
 }
 
 fn validate_port(port: i64) -> Result<u16, SettingsError> {
@@ -209,12 +240,14 @@ mod tests {
                 data_dir: PathBuf::from("/root/data"),
                 port: 5000,
                 start_at_login: true,
+                worker_path: Vec::new(),
             }
         );
     }
 
     #[test]
     fn invalid_files_are_refused() {
+        let too_many = format!(r#"{{"workerPath": {:?}}}"#, vec!["/bin"; 33]);
         let cases = [
             (r#"{"port": 80}"#, "port"),
             (r#"{"port": 70000}"#, "port"),
@@ -225,6 +258,11 @@ mod tests {
                 r#"{"dataDir": "/Applications/Agent Board Server.app/Contents/data"}"#,
                 "dataDir",
             ),
+            (r#"{"workerPath": ["bin"]}"#, "workerPath"),
+            (r#"{"workerPath": ["/a:/b"]}"#, "workerPath"),
+            (r#"{"workerPath": ["/a\nb"]}"#, "workerPath"),
+            (r#"{"workerPath": [""]}"#, "workerPath"),
+            (too_many.as_str(), "workerPath"),
         ];
         for (text, field) in cases {
             match Settings::parse(text, &defaults()) {
@@ -241,6 +279,32 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn worker_path_entries_are_kept_in_order_and_need_not_exist() {
+        let at_the_limit = format!(r#"{{"workerPath": {:?}}}"#, vec!["/bin"; 32]);
+
+        assert_eq!(
+            Settings::parse(&at_the_limit, &defaults())
+                .unwrap()
+                .worker_path
+                .len(),
+            32
+        );
+        assert_eq!(
+            Settings::parse(
+                r#"{"workerPath": ["/no/such/dir", "/opt/x y"]}"#,
+                &defaults()
+            )
+            .unwrap()
+            .worker_path,
+            [PathBuf::from("/no/such/dir"), PathBuf::from("/opt/x y")]
+        );
+        assert!(Settings::parse(r#"{"workerPath": []}"#, &defaults())
+            .unwrap()
+            .worker_path
+            .is_empty());
     }
 
     #[test]

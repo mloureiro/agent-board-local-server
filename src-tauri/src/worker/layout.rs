@@ -1,8 +1,10 @@
 use std::fs;
 use std::io;
-use std::os::unix::fs::symlink;
+use std::io::Write;
+use std::os::unix::fs::{symlink, OpenOptionsExt};
 use std::path::Path;
 
+use super::board_local;
 use crate::paths::AppPaths;
 
 pub fn ensure(paths: &AppPaths, board: &Path, app_executable: &Path) -> io::Result<()> {
@@ -15,7 +17,24 @@ pub fn ensure(paths: &AppPaths, board: &Path, app_executable: &Path) -> io::Resu
         fs::create_dir_all(dir)?;
     }
     point(&paths.worker_board(), board)?;
+    write_script(&paths.worker_board_local(), &board_local::script(paths))?;
     point(&paths.worker_credentials(), app_executable)
+}
+
+fn write_script(file: &Path, content: &str) -> io::Result<()> {
+    if fs::read_to_string(file).is_ok_and(|current| current == content) {
+        return Ok(());
+    }
+    let staged = file.with_extension("tmp");
+    let mut handle = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o755)
+        .open(&staged)?;
+    handle.write_all(content.as_bytes())?;
+    drop(handle);
+    fs::rename(staged, file)
 }
 
 fn point(link: &Path, target: &Path) -> io::Result<()> {
@@ -54,5 +73,41 @@ mod tests {
 
         ensure(&paths, &second, &app).unwrap();
         assert_eq!(fs::read_link(paths.worker_board()).unwrap(), second);
+    }
+
+    #[test]
+    fn the_helper_script_is_executable_left_alone_when_unchanged_and_rewritten_when_different() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path());
+        let board = dir.path().join("board");
+        let app = dir.path().join("app");
+        let script = paths.worker_board_local();
+
+        ensure(&paths, &board, &app).unwrap();
+        assert_eq!(
+            fs::read_to_string(&script).unwrap(),
+            board_local::script(&paths)
+        );
+        assert_eq!(
+            fs::metadata(&script).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+
+        let first_write = fs::metadata(&script).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        ensure(&paths, &board, &app).unwrap();
+        assert_eq!(
+            fs::metadata(&script).unwrap().modified().unwrap(),
+            first_write
+        );
+
+        fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        ensure(&paths, &board, &app).unwrap();
+        assert_eq!(
+            fs::read_to_string(&script).unwrap(),
+            board_local::script(&paths)
+        );
     }
 }

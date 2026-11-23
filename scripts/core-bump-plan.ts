@@ -23,3 +23,9 @@ export function failedIncludesSummary(failed: CoreInclude[], commit: string): st
   const lines = failed.map((include) => `  ${include.branch} (${include.commit})`);
   return [`${failed.length} included branch(es) are not ancestors of ${commit}:`, ...lines].join('\n');
 }
+
+export type BumpFiles = { pin: string; previous: string; caddyfile: string };
+
+export function planBumpFiles(pinText: string, commit: string, caddyfile: string): BumpFiles {
+  return { pin: rewritePinCommit(pinText, commit), previous: pinText, caddyfile };
+}

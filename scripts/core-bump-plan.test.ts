@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { failedIncludesSummary, parseBumpArgs, rewritePinCommit } from './core-bump-plan.ts';
+import { failedIncludesSummary, parseBumpArgs, planBumpFiles, rewritePinCommit } from './core-bump-plan.ts';
 
 const commit = 'b587c6ac0954ab467e4a3d07abece368af9ee524';
 
@@ -51,5 +51,18 @@ describe('failedIncludesSummary', () => {
     expect(summary).toContain('2 included branch(es)');
     expect(summary).toContain(`feat/a (${'1'.repeat(40)})`);
     expect(summary).toContain(`feat/b (${'2'.repeat(40)})`);
+  });
+});
+
+describe('planBumpFiles', () => {
+  const next = 'a62d3eda34979b4b8a064f9f24cf9b0c9cd0309e';
+  const committed = readFileSync(new URL('../core.pin.json', import.meta.url), 'utf8');
+
+  it('keeps the old pin text as the previous file and carries the new Caddyfile', () => {
+    expect(planBumpFiles(committed, next, ':8080 {}\n')).toEqual({
+      pin: rewritePinCommit(committed, next),
+      previous: committed,
+      caddyfile: ':8080 {}\n',
+    });
   });
 });

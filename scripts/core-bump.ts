@@ -1,8 +1,8 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { failedIncludesSummary, parseBumpArgs, rewritePinCommit } from './core-bump-plan.ts';
+import { failedIncludesSummary, parseBumpArgs, planBumpFiles } from './core-bump-plan.ts';
 import { CADDYFILE_COPY } from './core-build-plan.ts';
 import { parseCorePin, type CorePin } from './core-pin.ts';
 
@@ -63,12 +63,17 @@ function main(): void {
 
   if (request.commit === current.commit) throw new Error(`core.pin.json already names ${request.commit}`);
   fetchFork(current.repository, [current.commit, request.commit]);
-  copyFileSync(pinPath, previousPath);
-  writeFileSync(pinPath, rewritePinCommit(readFileSync(pinPath, 'utf8'), request.commit));
-  writeFileSync(join(root, CADDYFILE_COPY), git(['show', `${request.commit}:apps/frontend/Caddyfile`]));
-  console.log(`core.pin.json now names ${request.commit}; the old pin is in core.pin.previous.json`);
-  const next = readPin(pinPath);
+  const files = planBumpFiles(
+    readFileSync(pinPath, 'utf8'),
+    request.commit,
+    git(['show', `${request.commit}:apps/frontend/Caddyfile`]),
+  );
+  const next = parseCorePin(JSON.parse(files.pin));
   verifyIncludes(next);
+  writeFileSync(previousPath, files.previous);
+  writeFileSync(pinPath, files.pin);
+  writeFileSync(join(root, CADDYFILE_COPY), files.caddyfile);
+  console.log(`core.pin.json now names ${request.commit}; the old pin is in core.pin.previous.json`);
   printContractDiff(current.commit, next.commit);
 }
 

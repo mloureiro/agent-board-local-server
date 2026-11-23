@@ -35,6 +35,11 @@ export const caddyfileCopyError = (pinned: string, committed: string): string | 
     ? null
     : `${CADDYFILE_COPY} differs from apps/frontend/Caddyfile at the pinned commit; copy the pinned file over ${CADDYFILE_COPY} and run pnpm test so the header tables are checked against it`;
 
+export const caddyfileRules = (out: string | null): { check: boolean; fingerprint: boolean } => ({
+  check: out === null,
+  fingerprint: out === null,
+});
+
 export const stagedBinaries = {
   server: `binaries/board-server-${TARGET_TRIPLE}`,
   cli: `binaries/board-${TARGET_TRIPLE}`,

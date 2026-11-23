@@ -15,10 +15,23 @@ function readJson(path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
 }
 
-export function pinnedCommit(): string {
-  const commit = readJson(join(repoRoot, 'core.pin.json'))['commit'];
-  if (typeof commit !== 'string') throw new Error('core.pin.json names no commit');
+export function pinFileCommit(pinFile: string): string {
+  const commit = readJson(pinFile)['commit'];
+  if (typeof commit !== 'string') throw new Error(`${pinFile} names no commit`);
   return commit;
+}
+
+export const pinnedCommit = (): string => pinFileCommit(join(repoRoot, 'core.pin.json'));
+
+export function buildStage(pinFile: string): string {
+  const stageDir = join(repoRoot, '.core', 'stage', pinFileCommit(pinFile));
+  const result = spawnSync('pnpm', ['core:build', '--pin', pinFile, '--out', stageDir], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'inherit', 'pipe'],
+  });
+  if (result.status !== 0) throw new Error(`Building ${pinFile} into ${stageDir} failed:\n${result.stderr}`);
+  return stageDir;
 }
 
 export function requireStagedCore(): string {
@@ -144,7 +157,7 @@ export function scratchDir(prefix: string): string {
 }
 
 export async function startRunner(
-  options: { appRoot?: string; upstreamPort?: number; enrolFromStdin?: boolean } = {},
+  options: { appRoot?: string; upstreamPort?: number; enrolFromStdin?: boolean; coreDir?: string } = {},
 ): Promise<Runner> {
   buildRunner();
   const appRoot = options.appRoot ?? scratchDir('abls-smoke-');
@@ -152,6 +165,7 @@ export async function startRunner(
   const args = ['--app-root', appRoot, '--port', String(port)];
   if (options.upstreamPort !== undefined) args.push('--upstream', `http://127.0.0.1:${options.upstreamPort}`);
 
+  if (options.coreDir !== undefined) args.push('--core', options.coreDir);
   if (options.enrolFromStdin === true) args.push('--enrol-from-stdin');
   const child = spawn(runnerBinary, args, { stdio: ['pipe', 'pipe', 'pipe'] });
   if (options.enrolFromStdin !== true) child.stdin.end();

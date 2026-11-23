@@ -6,6 +6,7 @@ export const FORK_REPOSITORY: CoreRepository = 'mloureiro/agent-board';
 
 export interface CoreInclude {
   branch: string;
+  why: string;
   commit: string;
 }
 
@@ -32,7 +33,9 @@ function parseInclude(value: unknown): CoreInclude {
     throw new Error('Every included branch of the core pin must name its branch');
   if (!isCommit(value.commit))
     throw new Error(`The included branch ${value.branch} must name a full 40-character commit`);
-  return { branch: value.branch, commit: value.commit };
+  if (!isNonEmptyString(value.why) || /[\r\n]/.test(value.why))
+    throw new Error(`The included branch ${value.branch} must say in one line why the pin includes it`);
+  return { branch: value.branch, why: value.why, commit: value.commit };
 }
 
 export function parseCorePin(value: unknown): CorePin {

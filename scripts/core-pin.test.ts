@@ -11,14 +11,16 @@ const valid = {
 const fork = {
   ...valid,
   branch: 'local-server',
-  includes: [{ branch: 'feat/listen-host', commit: '72ad101dba00b800ede728a07409a39b1ac05606' }],
+  includes: [
+    { branch: 'feat/listen-host', why: 'binds to loopback', commit: '72ad101dba00b800ede728a07409a39b1ac05606' },
+  ],
 };
 
 const upstream = { repository: 'codeplant-de/agent-board', commit: valid.commit, reason: 'upstream has it all' };
 
 describe('the core pin', () => {
-  it('accepts the pin this repository commits', () => {
-    const committed: unknown = JSON.parse(readFileSync(new URL('../core.pin.json', import.meta.url), 'utf8'));
+  it.each(['core.pin.json', 'core.pin.previous.json'])('accepts the pin this repository commits in %s', (file) => {
+    const committed: unknown = JSON.parse(readFileSync(new URL(`../${file}`, import.meta.url), 'utf8'));
     expect(() => parseCorePin(committed)).not.toThrow();
   });
 
@@ -45,10 +47,21 @@ describe('the core pin', () => {
   });
 
   it('refuses an included branch without a full commit', () => {
-    expect(() => parseCorePin({ ...fork, includes: [{ branch: 'feat/x', commit: 'abc' }] })).toThrow(
+    expect(() => parseCorePin({ ...fork, includes: [{ branch: 'feat/x', why: 'x', commit: 'abc' }] })).toThrow(
       'feat/x must name a full 40-character commit',
     );
-    expect(() => parseCorePin({ ...fork, includes: [{ commit: valid.commit }] })).toThrow('must name its branch');
+    expect(() => parseCorePin({ ...fork, includes: [{ why: 'x', commit: valid.commit }] })).toThrow(
+      'must name its branch',
+    );
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['empty', ' '],
+    ['split over two lines', 'binds to loopback\nand more'],
+  ])('refuses an included branch whose why is %s', (_label, why) => {
+    const include = { branch: 'feat/x', why, commit: valid.commit };
+    expect(() => parseCorePin({ ...fork, includes: [include] })).toThrow('feat/x must say in one line why');
   });
 
   it('accepts upstream with no branch and with an empty list', () => {

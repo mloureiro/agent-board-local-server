@@ -1,12 +1,12 @@
 # agent-board-local-server
 
-A macOS menu-bar app that runs an [agent-board](https://github.com/mloureiro/agent-board) server on one machine: backend, database, sign-in headers and worker, started and stopped together.
+A macOS menu-bar app that runs an [agent-board](https://github.com/mloureiro/agent-board) server on one machine: backend, database, sign-in and worker, started and stopped together.
 
 It packages the agent-board core at the commit named in `core.pin.json` and holds no server code of its own. A change to server behaviour is made in the core, and this repository then moves its pin.
 
 Today the app starts the backend (PGlite in process, loopback only) as a supervised sidecar, serves the board through its own proxy and, once enrolled, runs the worker. A crashed process is restarted after 1 s, 5 s and 25 s; a fourth crash without a stable run in between leaves it down, and the count goes back to zero after 10 minutes up. A backend that stops answering its health check three times in a row (checked every 60 s) is treated as crashed. The tray shows the state of each process and stops everything on Quit, on SIGTERM, SIGINT and SIGHUP, and on any other exit of the app (the system ending it at log out, for one) that still finds something running.
 
-The app keeps its files under `~/Library/Application Support/dev.mloureiro.agent-board-local-server/`: `settings.json` (`userName`, `dataDir`, `backupDir`, `port`, `startAtLogin`, `workerPath`; read at start and never rewritten), `logs/`, `run/`, `worker/` and the data folder. The proxy secret, the machine token and the data key live in the login Keychain and nowhere else. `cargo run --example headless -- --app-root <dir>` runs the same runtime without the tray until SIGTERM.
+The app keeps its files under `~/Library/Application Support/dev.mloureiro.agent-board-local-server/`: `settings.json` (`userName`, `dataDir`, `backupDir`, `port`, `startAtLogin`, `workerPath`; read at start and never rewritten), `logs/`, `run/`, `worker/` and the data folder. The machine token and the data key live in the login Keychain and nowhere else. `cargo run --example headless -- --app-root <dir>` runs the same runtime without the tray until SIGTERM.
 
 ## On disk, keys and what is stored in plain form
 
@@ -26,7 +26,7 @@ Settings keys, all optional: `userName` (default the macOS login name, the board
 
 `AGENT_BOARD_LOCAL_SERVER_ROOT` moves the whole app folder, for running a build beside an installed one. Any root other than the default also gets its own Keychain service and leaves the login item alone.
 
-**Keys.** The board's content is sealed in the browser with a data key that the passphrase and the recovery key unlock; the server only stores sealed text and a wrapped copy of the key. The app never holds that key. The worker needs it to seal and open content, so "Connect worker…" takes it, with a machine token, and stores both in the login Keychain; the CLI reads them through the credentials helper and neither reaches a file or a process argument. The proxy secret lives in the Keychain too.
+**Keys.** The board's content is sealed in the browser with a data key that the passphrase and the recovery key unlock; the server only stores sealed text and a wrapped copy of the key. The app never holds that key. The worker needs it to seal and open content, so "Connect worker…" takes it, with a machine token, and stores both in the login Keychain; the CLI reads them through the credentials helper and neither reaches a file or a process argument.
 
 **Stored unsealed.** `at-rest/plain-columns.json` is the authority for what is stored unsealed: it lists every database column that is not sealed, each with its reason, and the smoke suite fails when a column is neither sealed nor listed. In short: ids, timestamps, the login name, workflow states and flags from fixed lists (status, priority, model name, who moved a card), scheduling numbers and cron expressions, worker machine names, the Claude session id (a pointer, not the transcript), the wrapped data key, the machine token hash (not the token), the data key fingerprint, the PR state word (not which PR), transcript event kind and output size, counts and parent sequence numbers, the CLI version and API number, and the time zone name. Titles, prompts, notes, transcripts, directories and watches are sealed. Lane and machine names are chosen by you (a lane when you add it, a machine name when you issue its token on the board) and are stored in plain text by the core's design, so a confidential project name used as either is readable from a copied database. `scripts/acceptance.ts` searches a copy of the data folder for a marker typed into a card as UTF-8 and UTF-16.
 
@@ -106,7 +106,7 @@ The headless runner reads the same pair from stdin, so that neither value appear
 cargo run --example headless -- --app-root <dir> --port <port> --enrol-from-stdin
 ```
 
-`--worker` starts an already enrolled worker from that runner's own Keychain items (the app's own scheme: one Keychain service per app root, so a scratch root never touches the app's items; the runner's proxy secret stays in memory).
+`--worker` starts an already enrolled worker from that runner's own Keychain items (the app's own scheme: one Keychain service per app root, so a scratch root never touches the app's items).
 
 On Quit the dispatch tick, the listener and the watch unit get SIGTERM, then the running cards are asked to pause through `board internal shutdown --grace 20`, which leaves them resumable on this machine, then any worker still left is killed, and only then do the proxy and the backend stop. The whole sequence takes about a minute at most.
 
@@ -124,6 +124,10 @@ ln -s "$HOME/Library/Application Support/dev.mloureiro.agent-board-local-server/
 
 "Check worker" in the tray runs the bundled `board doctor --json` with the worker's environment, leaves out the checks that do not apply to a worker the app supervises (launchd agents and the core's own lookup of tools), and looks up `claude` and `gh` itself on the worker's `PATH`, `workerPath` included. The result goes to `logs/worker-check.log`, which the app opens, and the Worker line shows "check: N problems" ("check: 1 problem" for one). The item is enabled once the worker is connected; the next dispatch tick replaces the Worker line.
 
+## Security model
+
+The backend runs with `NO_LOGIN_USER` set to the settings user and listens on loopback only, so it treats every request as that user. `ALLOWED_HOSTS` limits it to the proxy's two origins (`127.0.0.1:<port>` and `localhost:<port>`), which stops a web page from reaching it by DNS rebinding. The proxy guards Host, Origin and Sec-Fetch-Site. Any process on the machine can still act as the user, as before.
+
 ## Uninstall
 
 Quit the app first, then run the executable inside the `.app` (the path below is for an app in `/Applications`):
@@ -133,7 +137,7 @@ Quit the app first, then run the executable inside the `.app` (the path below is
 "/Applications/Agent Board Server.app/Contents/MacOS/agent-board-local-server" --uninstall --delete-data
 ```
 
-`--uninstall` removes the login item (this build's file and the one an earlier build wrote) and the app's Keychain items for the configured root: the proxy secret, the machine token and the data key, including a pair being checked. The app folder, the data and the backups stay. `--delete-data` also removes the app folder, but only when it holds this app's `settings.json` (a regular file, not a symlink); otherwise it prints that the folder does not look like this app's and leaves it. It also leaves a root that is a symlink, has a `..` component, is the home folder or any folder above it, however the path is spelled, and takes no lock in a root it refuses. A `dataDir` or `backupDir` outside the app folder is printed and left for you to remove. With the app running it prints "quit the app first" and changes nothing. Any other argument prints a usage line and exits 2.
+`--uninstall` removes the login item (this build's file and the one an earlier build wrote) and the app's Keychain items for the configured root: the machine token and the data key, including a pair being checked. The app folder, the data and the backups stay. `--delete-data` also removes the app folder, but only when it holds this app's `settings.json` (a regular file, not a symlink); otherwise it prints that the folder does not look like this app's and leaves it. It also leaves a root that is a symlink, has a `..` component, is the home folder or any folder above it, however the path is spelled, and takes no lock in a root it refuses. A `dataDir` or `backupDir` outside the app folder is printed and left for you to remove. With the app running it prints "quit the app first" and changes nothing. Any other argument prints a usage line and exits 2.
 
 With `AGENT_BOARD_LOCAL_SERVER_ROOT` set it acts on that root and its own Keychain service, and leaves the login item alone. An ad-hoc signed build can raise the Keychain prompt once per item; allow each. The headless runner accepts `--uninstall [--delete-data] --app-root <dir>` for a scratch root and refuses the default root. The `.app` itself is removed by hand.
 
@@ -179,9 +183,9 @@ Each branch in `includes` carries a one-line `why`, and `reason` says why the pi
 
 ## The smoke suite
 
-`pnpm test:smoke` builds and starts the headless runner (`cargo build --example headless`) with a scratch app root and drives the real backend through the proxy: health, sign-in, the machine API, event delivery, a foreign Host, loopback-only listeners and the at-rest column inventory (`at-rest/plain-columns.json` lists every stored column that is not sealed, each with a reason). It fails with "run pnpm core:build" when the staged core is not the pin.
+`pnpm test:smoke` builds and starts the headless runner (`cargo build --example headless`) with a scratch app root and drives the real backend through the proxy: health, sign-in (the no-login user through the proxy, and the backend's refusal of any Host but the proxy's), the machine API, event delivery, a foreign Host, loopback-only listeners and the at-rest column inventory (`at-rest/plain-columns.json` lists every stored column that is not sealed, each with a reason). It fails with "run pnpm core:build" when the staged core is not the pin.
 
-The upgrade case builds `core.pin.previous.json` into `.core/stage/<commit>/`, creates a card with that core on a scratch app root, then opens the same root with the app's core and checks the card is still listed and exactly one `pre-upgrade-*` backup was taken. The first run builds the previous pin and takes minutes; later runs reuse the stage. The build needs the Bun version the previous pin names and fails with a message naming it. The case fails when the previous pin names the same commit as the current one.
+The upgrade case builds `core.pin.previous.json` into `.core/stage/<commit>/`, creates a card with that core on a scratch app root, then opens the same root with the app's core and checks the card is still listed and exactly one `pre-upgrade-*` backup was taken. The first run builds the previous pin and takes minutes; later runs reuse the stage. The build needs the Bun version the previous pin names and fails with a message naming it. The case fails when the previous pin names the same commit as the current one, and while the previous pin predates board login: its core refuses to start without the proxy secret this app no longer sets.
 
 The header-parity test runs the Caddy image named by `ARG CADDY_IMAGE` in the pinned `apps/frontend/Dockerfile` in Docker, pulling it on first use, and compares its answers with the proxy's for a fixed request list. Without Docker it fails; set `SKIP_CADDY_PARITY=1` to skip it on purpose.
 

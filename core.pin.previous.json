@@ -1,6 +1,6 @@
 {
   "repository": "mloureiro/agent-board",
-  "commit": "a62d3eda34979b4b8a064f9f24cf9b0c9cd0309e",
+  "commit": "b587c6ac0954ab467e4a3d07abece368af9ee524",
   "branch": "local-server",
   "includes": [
     {
@@ -37,6 +37,21 @@
       "branch": "feat/agent-board-local-server-6h4/init-force-verify",
       "why": "makes board init --force check the token and the data key with the board whenever a URL and credentials are known, credentials-command mode included, and rewrite only the machine name of a kept config.json when the board names another",
       "commit": "2ae8fda1c3123867ba969c0ccd0a59eb2680dd9f"
+    },
+    {
+      "branch": "feat/agent-board-local-server-keu/kill-who-fallback",
+      "why": "retries the worker shutdown signal with --kill-who on systemd older than 252, which refuses --kill-whom",
+      "commit": "dfbcc27939951975d34b61dc827c86e168937ffc"
+    },
+    {
+      "branch": "feat/agent-board-local-server-81f/no-self-signal-in-tests",
+      "why": "stops the worker tests sending SIGUSR2 to the test process, which made every core test run write Node diagnostic reports holding the whole environment, and git-ignores those reports",
+      "commit": "0169c700126aa87ccd65daadd4a42abab4c8d15a"
+    },
+    {
+      "branch": "feat/agent-board-local-server-bek/clear-group-kill-timer",
+      "why": "stops the worker signalling an agent's process group once it has ended (stored and cleared escalation timer, no terminate() after exit, groupExists guards in endGroup and runLimited)",
+      "commit": "c856fc6971a56c61e3ccdedc6cf744549436801d"
     }
   ],
   "reason": "The fork's local-server branch is upstream 79255ce plus the included branches, changes a single-machine server needs and upstream does not have yet."

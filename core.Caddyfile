@@ -1,21 +1,21 @@
-# TLS terminates at Traefik in the cluster. Authelia forward-auth runs there for the UI and sets the Remote-*
-# headers, which reverse_proxy passes on to the backend. /api/machine/* is routed past the login (bearer tokens,
-# checked by the backend). Caddy adds Board-Proxy-Secret (the PROXY_SECRET env var) to every proxy to the backend, which
-# accepts the Remote-* headers only with it, so no other pod that reaches the backend can sign in by setting them. header_up
-# overwrites any value a client sent.
+# TLS terminates at Traefik in the cluster. Sign-in is the backend's own: it sets an HttpOnly session cookie when someone signs
+# in and the browser sends it back on its own; only the backend reads it. /api/machine/* is the CLI's, with its own bearer
+# tokens. Caddy adds no header on the way in.
 
 # What the backend serves is data, never a page. Its answers share the app's origin, so a page it made up under /api or
 # /trpc would run under `script-src 'self'` with the app's access to the keys in IndexedDB, and a header of its choosing
-# (Clear-Site-Data wipes that storage, Set-Cookie, Refresh, Link, Location, Service-Worker-Allowed, Strict-Transport-Security,
-# Access-Control-*) would act on the app's origin too. So nothing the backend sends as a header reaches the browser: `header_down -*`
-# drops every one of them (an allow-list, so a header nobody has thought of is dropped as well; the status code and the body
-# are all that pass), and the answer leaves with the headers below, which `>` writes at the last moment. Everything under
+# (Clear-Site-Data wipes that storage, Refresh, Link, Location, Service-Worker-Allowed, Strict-Transport-Security,
+# Access-Control-*) would act on the app's origin too. So of what the backend sends as a header, nothing reaches the browser
+# but Set-Cookie on /trpc (below). `header_down -*` drops every header on the other paths (an allow-list, so a header nobody
+# has thought of is dropped as well; the status code and the body are all that pass), and the answer leaves with the
+# headers below, which `>` writes at the last moment. Everything under
 # these paths is JSON (tRPC, the machine API, /healthz), so the type is fixed to it. The one stream, GET /api/machine/events
 # (server-sent events), therefore leaves as application/json without its own headers; its chunks still pass unbuffered,
 # and its clients do not read those headers. `sandbox` with `default-src 'none'`
 # leaves a browser that opened one as a page with no origin, no scripts and nothing to load. A script of a service worker
 # must have a JavaScript type and a worker is scoped by its path, so one cannot be registered from here either.
-# Every proxy to the backend is in this snippet, and every handle that proxies imports it.
+# Every proxy to the backend is in this snippet, except /trpc's and the SAML assertion consumer's below, which are the
+# same proxy with one answer they treat on their own.
 (data_headers) {
 	header {
 		>Content-Type "application/json; charset=utf-8"
@@ -30,7 +30,6 @@
 (data_only) {
 	import data_headers
 	reverse_proxy backend:4000 {
-		header_up Board-Proxy-Secret {env.PROXY_SECRET}
 		header_down -*
 	}
 }
@@ -41,18 +40,57 @@
 	# The app is a static SPA with no inline scripts. 'wasm-unsafe-eval' is for Argon2 (WebAssembly, compiled from bytes in
 	# the bundle); 'unsafe-inline' for styles is Mantine's <style> tags for its theme variables. Images from other origins
 	# are refused on purpose: a markdown image in an agent's note would otherwise send a request to a stranger's server.
-	# `worker-src 'none'`: the app registers no service or web worker, and none can be added.
+	# `worker-src 'self'`: the app registers one service worker, /sw.js from the static files, which only handles clicks on
+	# notifications and has no fetch handler. A backend path cannot be registered as a worker (see data_headers).
 	# Cross-Origin-Opener-Policy keeps other windows from holding a reference to the app's window.
 	header {
-		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 		Referrer-Policy "no-referrer"
 		X-Content-Type-Options "nosniff"
 		Cross-Origin-Opener-Policy "same-origin"
 		Cross-Origin-Resource-Policy "same-origin"
 	}
 
+	# The sign-in and logout procedures live here and set the session cookie, so Set-Cookie is the one header that passes,
+	# and only when it is exactly what the backend writes (sessionCookie in services/auth/sessions.ts; a backend test pins the
+	# strings): one of the two cookie names, a session token or nothing, and the fixed attributes in the backend's order. A
+	# cookie with a Domain, another name or another attribute is dropped, so a backend gone hostile cannot set a cookie for
+	# a sibling site. {rp.header.Set-Cookie} holds every Set-Cookie of the answer joined with a comma, which no cookie of
+	# ours contains, so an answer with two of them matches nothing and passes none. Nothing else of the backend's headers is
+	# copied: `header_down -*` drops them all, so the status and the body pass in either case.
 	handle /trpc* {
-		import data_only
+		import data_headers
+		reverse_proxy backend:4000 {
+			header_down -*
+			handle_response {
+				@session_cookie vars_regexp {rp.header.Set-Cookie} "^(__Host-board-session=(abs_[A-Za-z0-9_-]{43}; Path=/; HttpOnly; SameSite=Lax; Max-Age=34560000|; Path=/; HttpOnly; SameSite=Lax; Max-Age=0); Secure|board-session=(abs_[A-Za-z0-9_-]{43}; Path=/; HttpOnly; SameSite=Lax; Max-Age=34560000|; Path=/; HttpOnly; SameSite=Lax; Max-Age=0))$"
+				header @session_cookie Set-Cookie {rp.header.Set-Cookie}
+				copy_response
+			}
+		}
+	}
+
+	# The identity provider posts the SAML response here from the browser, and the backend answers with a 303 to
+	# /login/saml?flow=<id> for a good one, or /login/saml?error=<code> for a refused one, which the browser has to follow: the
+	# one backend answer that must navigate (a JSON body for a refusal would be a download). The backend's Location never
+	# reaches the browser. A 303 whose Location is exactly one of those is answered with Caddy's own redirect to it, copying
+	# nothing else from the backend's answer; any other 303 becomes a 502. The path is fixed to this origin's /login/saml, so
+	# the backend cannot send the browser anywhere else, and every other answer is data_only's.
+	handle /api/auth/saml/acs {
+		import data_headers
+		reverse_proxy backend:4000 {
+			header_down -*
+			@signed_in status 303
+			handle_response @signed_in {
+				@return vars_regexp {rp.header.Location} ^/login/saml\?(flow=[A-Za-z0-9_-]{1,128}|error=[a-z_]{1,32})$
+				handle @return {
+					redir {rp.header.Location} 303
+				}
+				handle {
+					respond 502
+				}
+			}
+		}
 	}
 
 	handle /api/* {

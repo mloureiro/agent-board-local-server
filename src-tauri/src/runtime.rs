@@ -15,7 +15,7 @@ use crate::core_build::CoreBuild;
 use crate::localtime;
 use crate::paths::{AppPaths, Resources, Sidecars};
 use crate::proxy::{Proxy, ProxyConfig};
-use crate::secrets::{proxy_secret, SecretError, SecretStore};
+use crate::secrets::SecretStore;
 use crate::settings::{Settings, SettingsError};
 use crate::supervisor::orphans;
 use crate::supervisor::process::stop_requested;
@@ -53,14 +53,12 @@ pub struct WorkerConfig {
 #[derive(Debug)]
 pub enum StartError {
     Settings(SettingsError),
-    Secret(SecretError),
 }
 
 impl fmt::Display for StartError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Settings(error) => error.fmt(f),
-            Self::Secret(error) => error.fmt(f),
         }
     }
 }
@@ -225,7 +223,6 @@ fn proxy_needs_restart(row: Option<&Status>, task_finished: bool) -> bool {
 
 pub async fn start(
     config: Config,
-    secrets: Arc<dyn SecretStore>,
     board: Arc<StatusBoard>,
     activity: Arc<Activity>,
 ) -> Result<Handle, StartError> {
@@ -246,9 +243,6 @@ pub async fn start(
         settings.port = port;
     }
     orphans::sweep(&config.paths.run_dir(), ORPHAN_GRACE).await;
-    let secret = proxy_secret(secrets.as_ref())
-        .map_err(StartError::Secret)
-        .map_err(blocked)?;
 
     let (stop_status, status_stopped) = watch::channel(false);
     let status_task = tokio::spawn(log_status_changes(
@@ -269,8 +263,6 @@ pub async fn start(
     let (backend, backend_stopped, backend_commands) = Control::new();
     let proxy_setup = ProxySetup {
         port: settings.port,
-        user_name: settings.user_name.clone(),
-        secret: secret.clone(),
         frontend: config.resources.frontend(),
         log: LogFile::new(config.paths.log_file(PROXY)),
         upstream_override: config.upstream_override,
@@ -300,7 +292,6 @@ pub async fn start(
             BackendLauncher {
                 config,
                 settings: settings.clone(),
-                secret,
                 port: None,
             },
             Some(Healthz),
@@ -409,8 +400,6 @@ async fn log_status_changes(
 #[derive(Clone)]
 struct ProxySetup {
     port: u16,
-    user_name: String,
-    secret: String,
     frontend: std::path::PathBuf,
     log: LogFile,
     upstream_override: Option<u16>,
@@ -441,8 +430,6 @@ async fn serve_proxy(setup: ProxySetup, board: Arc<StatusBoard>, mut stop: watch
     let lookup = board.clone();
     let started = Proxy::start(ProxyConfig {
         port: setup.port,
-        user_name: setup.user_name,
-        secret: setup.secret,
         frontend: setup.frontend,
         log: setup.log,
         upstream_port: Arc::new(move || setup.upstream_override.or_else(|| running_port(&lookup))),
@@ -537,7 +524,6 @@ async fn restart_requested(
 struct BackendLauncher {
     config: Config,
     settings: Settings,
-    secret: String,
     port: Option<u16>,
 }
 
@@ -551,7 +537,7 @@ impl Launcher for BackendLauncher {
             name: BACKEND,
             program: self.config.sidecars.board_server.clone(),
             args: Vec::new(),
-            env: backend::environment(&self.settings, &self.secret, port, &self.config.resources),
+            env: backend::environment(&self.settings, port, &self.config.resources),
         };
         RunningProcess::spawn(&spec, &self.config.paths)
             .map(|process| Spawned::new(process, Status::Running { port }))

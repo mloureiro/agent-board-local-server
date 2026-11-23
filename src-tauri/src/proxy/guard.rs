@@ -1,12 +1,7 @@
-use http::header::{HeaderMap, HeaderName, HeaderValue, HOST, ORIGIN};
+use http::header::{HeaderMap, HOST, ORIGIN};
 use http::{Method, StatusCode};
 
 const SEC_FETCH_SITE: &str = "sec-fetch-site";
-const REMOTE_PREFIX: &str = "remote-";
-
-const SIGN_IN_USER: &str = "remote-user";
-const SIGN_IN_GROUPS: &str = "remote-groups";
-const SIGN_IN_SECRET: &str = "board-proxy-secret";
 
 /// Hop-by-hop and forwarding headers: a client must not decide what the backend is told about the connection.
 const NOT_FORWARDED: &[&str] = &[
@@ -40,32 +35,20 @@ impl Refusal {
     }
 }
 
-#[derive(Debug)]
-pub struct InvalidSignIn;
-
 pub struct Guard {
     hosts: [String; 2],
     origins: [String; 2],
-    user_name: HeaderValue,
-    secret: HeaderValue,
 }
 
 impl Guard {
-    pub fn new(port: u16, user_name: &str, secret: &str) -> Result<Self, InvalidSignIn> {
-        let sensitive = |text: &str| {
-            let mut value = HeaderValue::from_str(text).map_err(|_| InvalidSignIn)?;
-            value.set_sensitive(true);
-            Ok(value)
-        };
-        Ok(Self {
+    pub fn new(port: u16) -> Self {
+        Self {
             hosts: [format!("127.0.0.1:{port}"), format!("localhost:{port}")],
             origins: [
                 format!("http://127.0.0.1:{port}"),
                 format!("http://localhost:{port}"),
             ],
-            user_name: sensitive(user_name)?,
-            secret: sensitive(secret)?,
-        })
+        }
     }
 
     /// A browser always sends the real Host, an Origin on writes and Sec-Fetch-Site, so these checks stop
@@ -100,35 +83,18 @@ impl Guard {
         Ok(())
     }
 
-    /// Removes everything a client could use to impersonate the proxy, then sets the three sign-in headers.
-    pub fn sign_in(&self, headers: &mut HeaderMap) {
-        let claimed: Vec<HeaderName> = headers
-            .keys()
-            .filter(|name| {
-                let name = name.as_str();
-                name.starts_with(REMOTE_PREFIX)
-                    || name == SIGN_IN_SECRET
-                    || NOT_FORWARDED.contains(&name)
-            })
-            .cloned()
-            .collect();
-        for name in claimed {
-            headers.remove(name);
+    /// Removes the hop-by-hop and forwarding headers a client sent; every other header passes.
+    pub fn strip_forwarding(&self, headers: &mut HeaderMap) {
+        for name in NOT_FORWARDED {
+            headers.remove(*name);
         }
-        headers.insert(
-            HeaderName::from_static(SIGN_IN_USER),
-            self.user_name.clone(),
-        );
-        headers.insert(
-            HeaderName::from_static(SIGN_IN_GROUPS),
-            HeaderValue::from_static("admins"),
-        );
-        headers.insert(HeaderName::from_static(SIGN_IN_SECRET), self.secret.clone());
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use http::header::{HeaderName, HeaderValue};
+
     use super::*;
 
     const PORT: u16 = 4785;
@@ -141,7 +107,7 @@ mod tests {
     );
 
     fn guard() -> Guard {
-        Guard::new(PORT, "ines", "s3cret").unwrap()
+        Guard::new(PORT)
     }
 
     fn request(pairs: &[(&str, &str)]) -> HeaderMap {
@@ -322,38 +288,30 @@ mod tests {
     }
 
     #[test]
-    fn sign_in_replaces_what_a_client_claimed_and_drops_forwarding_headers() {
+    fn forwarding_and_hop_by_hop_headers_are_removed_and_the_rest_pass() {
         let mut headers = request(&[
             ("host", "127.0.0.1:4785"),
-            ("Remote-User", "root"),
-            ("remote-user", "second"),
-            ("REMOTE-GROUPS", "wheel"),
-            ("Remote-Email", "x@evil.test"),
-            ("Board-Proxy-Secret", "guess"),
-            ("connection", "keep-alive, remote-user"),
+            ("connection", "keep-alive"),
             ("x-forwarded-for", "1.2.3.4"),
+            ("x-forwarded-host", "evil.test"),
             ("forwarded", "for=1.2.3.4"),
+            ("transfer-encoding", "chunked"),
             ("authorization", "Bearer machine-token"),
             ("accept", "application/json"),
         ]);
-        guard().sign_in(&mut headers);
+        guard().strip_forwarding(&mut headers);
 
-        assert_eq!(headers.get_all("remote-user").iter().count(), 1);
-        assert_eq!(headers["remote-user"], "ines");
-        assert_eq!(headers["remote-groups"], "admins");
-        assert_eq!(headers["board-proxy-secret"], "s3cret");
-        for gone in ["remote-email", "connection", "x-forwarded-for", "forwarded"] {
+        for gone in [
+            "connection",
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "forwarded",
+            "transfer-encoding",
+        ] {
             assert!(!headers.contains_key(gone), "{gone} survived");
         }
         assert_eq!(headers["authorization"], "Bearer machine-token");
         assert_eq!(headers["accept"], "application/json");
         assert_eq!(headers["host"], "127.0.0.1:4785");
-    }
-
-    #[test]
-    fn sign_in_values_are_marked_sensitive() {
-        let mut headers = HeaderMap::new();
-        guard().sign_in(&mut headers);
-        assert!(headers["board-proxy-secret"].is_sensitive());
     }
 }

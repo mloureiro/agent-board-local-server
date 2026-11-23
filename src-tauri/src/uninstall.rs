@@ -571,7 +571,7 @@ mod tests {
         let report = execute(&[Step::DeleteKeychainItems], &env);
 
         assert!(!report.ok);
-        assert!(report.lines[0].contains("proxy-secret: keychain: locked"));
+        assert!(report.lines[0].contains("worker-token: keychain: locked"));
     }
 
     #[test]

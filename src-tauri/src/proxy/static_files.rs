@@ -98,6 +98,7 @@ pub fn content_type(path: &Path) -> &'static str {
         Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
         Some("ico") => "image/x-icon",
+        Some("webmanifest") => "application/manifest+json",
         Some("wasm") => "application/wasm",
         Some("woff2") => "font/woff2",
         Some("woff") => "font/woff",

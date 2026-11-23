@@ -83,7 +83,7 @@ describe('the proxy against the pinned Caddy', () => {
     if (skipped) return;
     if (!dockerAvailable())
       throw new Error('Docker is not available: start it, or set SKIP_CADDY_PARITY=1 to skip the parity test');
-    caddy = await startCaddy({ image: pinnedCaddyImage(), stubPort: stub.port, secret: 'parity-secret' });
+    caddy = await startCaddy({ image: pinnedCaddyImage(), stubPort: stub.port });
   }, 240_000);
 
   afterAll(
@@ -108,6 +108,7 @@ describe('the proxy against the pinned Caddy', () => {
     return { proxy, pinned };
   };
 
+  // The proxy forwards no backend Set-Cookie and no SAML 303 redirect, unlike the pinned Caddyfile, because a no-login backend sends neither.
   it.skipIf(skipped)('sends the same status and header set as Caddy for each request', async () => {
     const probes: Probe[] = [
       { method: 'GET', path: '/' },
@@ -116,8 +117,11 @@ describe('the proxy against the pinned Caddy', () => {
       { method: 'GET', path: '/t/some-task' },
       { method: 'GET', path: asset() },
       { method: 'GET', path: '/assets/missing.js' },
+      { method: 'GET', path: '/sw.js' },
+      { method: 'GET', path: '/manifest.webmanifest' },
       { method: 'GET', path: '/healthz' },
       { method: 'GET', path: '/trpc/me' },
+      { method: 'POST', path: '/api/auth/saml/acs', headers: json, body: '{}' },
       { method: 'POST', path: '/trpc/tasks.create', headers: json, body: '{}' },
       { method: 'GET', path: '/api/machine/list-tasks' },
       { method: 'POST', path: '/api/machine/list-tasks', headers: json, body: '{}' },
@@ -239,7 +243,7 @@ describe('the proxy against the pinned Caddy', () => {
     }
   });
 
-  it.skipIf(skipped)('forwards the sign-in secret and a client address, each its own way', async () => {
+  it.skipIf(skipped)('forwards no sign-in header and a client address, each its own way', async () => {
     const received = async (port: number) => {
       await send(port, { method: 'GET', path: '/trpc/me' });
       return stub.lastRequestHeaders();
@@ -248,10 +252,10 @@ describe('the proxy against the pinned Caddy', () => {
     const throughProxy = await received(runner.proxyPort);
     const throughCaddy = await received((caddy as Caddy).port);
 
-    expect(throughCaddy['board-proxy-secret']).toBe('parity-secret');
-    expect(throughProxy['board-proxy-secret']).toEqual(expect.any(String));
-    expect(throughProxy['board-proxy-secret']).not.toBe('parity-secret');
-    expect(throughProxy['remote-user']).toBe(runner.userName);
+    for (const headers of [throughProxy, throughCaddy]) {
+      expect(headers['board-proxy-secret']).toBeUndefined();
+      expect(headers['remote-user']).toBeUndefined();
+    }
     expect(throughProxy['x-forwarded-for']).toBe('127.0.0.1');
     expect(throughCaddy['x-forwarded-for']).toEqual(expect.any(String));
   });

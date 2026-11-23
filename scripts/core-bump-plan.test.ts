@@ -34,7 +34,8 @@ describe('rewritePinCommit', () => {
 
   it('changes the commit value and nothing else, keeping the file format', () => {
     const rewritten = rewritePinCommit(committed, next);
-    expect(rewritten).toBe(committed.replace(`"commit": "${commit}"`, `"commit": "${next}"`));
+    const current = (JSON.parse(committed) as { commit: string }).commit;
+    expect(rewritten).toBe(committed.replace(`"commit": "${current}"`, `"commit": "${next}"`));
     expect(rewritten).not.toBe(committed);
   });
 });

@@ -33,7 +33,6 @@ fn pglite_url(role: &str, data_dir: &Path) -> String {
 /// and neither the development sign-in bypass nor the self-update version is ever set.
 pub fn environment(
     settings: &Settings,
-    proxy_secret: &str,
     port: u16,
     resources: &Resources,
 ) -> BTreeMap<String, String> {
@@ -42,7 +41,11 @@ pub fn environment(
         ("NODE_ENV".into(), "production".into()),
         ("HOST".into(), "127.0.0.1".into()),
         ("PORT".into(), port.to_string()),
-        ("PROXY_SECRET".into(), proxy_secret.into()),
+        ("NO_LOGIN_USER".into(), settings.user_name.clone()),
+        (
+            "ALLOWED_HOSTS".into(),
+            format!("127.0.0.1:{0},localhost:{0}", settings.port),
+        ),
         ("DATABASE_URL".into(), pglite_url("", &database)),
         (
             "APP_DATABASE_URL".into(),
@@ -56,7 +59,6 @@ pub fn environment(
             "PGLITE_ASSETS_DIR".into(),
             resources.pglite_assets().to_string_lossy().into_owned(),
         ),
-        ("ALLOWED_GROUPS".into(), "admins".into()),
     ])
 }
 
@@ -135,9 +137,12 @@ mod tests {
         let url = "/Users/ines/Library/Application%20Support/app/data/pglite";
 
         assert_eq!(
-            environment(&settings, "s3cret", 51000, &resources),
+            environment(&settings, 51000, &resources),
             BTreeMap::from([
-                ("ALLOWED_GROUPS".into(), "admins".into()),
+                (
+                    "ALLOWED_HOSTS".into(),
+                    "127.0.0.1:4785,localhost:4785".into()
+                ),
                 (
                     "APP_DATABASE_URL".into(),
                     format!("pglite://board_app:x@local{url}")
@@ -149,12 +154,12 @@ mod tests {
                     "/App/Contents/Resources/resources/drizzle".into()
                 ),
                 ("NODE_ENV".into(), "production".into()),
+                ("NO_LOGIN_USER".into(), "ines".into()),
                 (
                     "PGLITE_ASSETS_DIR".into(),
                     "/App/Contents/Resources/resources/pglite".into()
                 ),
                 ("PORT".into(), "51000".into()),
-                ("PROXY_SECRET".into(), "s3cret".into()),
             ])
         );
     }

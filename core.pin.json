@@ -1,58 +1,43 @@
 {
   "repository": "mloureiro/agent-board",
-  "commit": "b587c6ac0954ab467e4a3d07abece368af9ee524",
-  "branch": "local-server",
+  "commit": "d2e025313168bf2afbc648cfa961e533dce4cbfa",
+  "branch": "local-server-v2",
   "includes": [
     {
-      "branch": "feat/agent-board-local-server-6h4/listen-host",
+      "branch": "feat/agent-board-local-server-x3q/listen-host",
       "why": "reads the listen address from HOST so the backend can bind to loopback",
-      "commit": "72ad101dba00b800ede728a07409a39b1ac05606"
+      "commit": "930a62bb361ee335829bbc1659b2e76037a1a9ec"
     },
     {
-      "branch": "feat/agent-board-local-server-6h4/pglite-driver",
+      "branch": "feat/agent-board-local-server-x3q/pglite-driver",
       "why": "runs the backend on an in-process PGlite for a pglite:// database URL, with PGLITE_ASSETS_DIR and PGLITE_SHARED_BUFFERS",
-      "commit": "05e88467f5ce6c06a890903d9006f040bce5d66c"
+      "commit": "97e8fa288e59f35c5e02ecba82ac1787f6ff5c71"
     },
     {
-      "branch": "feat/agent-board-local-server-6h4/credentials-command",
+      "branch": "feat/agent-board-local-server-x3q/credentials-command",
       "why": "lets the CLI take its token and data key from a command named by AGENT_BOARD_CREDENTIALS_COMMAND",
-      "commit": "079cb3275eeefef51e991c50eb8fb4f1df24ee84"
+      "commit": "65e9bb3715a161394a89e6ac7c40aaad399ad2f4"
     },
     {
-      "branch": "feat/agent-board-local-server-6h4/worker-shutdown",
-      "why": "adds board internal shutdown, which ends a worker and its runs within a grace period",
-      "commit": "736399a48f32ac2f508fdde1eca1e456f7340095"
+      "branch": "feat/agent-board-local-server-x3q/machine-whoami",
+      "why": "makes the version machine command name the machine a token belongs to, and makes board init take that name and check the token and the data key with the board before writing anything, with the fixes formerly on init-force-verify",
+      "commit": "8a765422dbf7bef846c3c3f40146734bb1e3871f"
     },
     {
-      "branch": "feat/agent-board-local-server-6h4/shutdown-idle-agent",
-      "why": "makes that shutdown kill an agent that stays alive after its turn ended",
-      "commit": "ecefdf85adc9854acc84f72da1c98214abdfc319"
+      "branch": "feat/agent-board-local-server-x3q/worker-shutdown",
+      "why": "adds board internal shutdown, which ends a worker and its runs within a grace period, with the fixes formerly on shutdown-idle-agent, kill-who-fallback and no-self-signal-in-tests",
+      "commit": "778a54c2fec7329713260a4c85252657b3cde178"
     },
     {
-      "branch": "feat/agent-board-local-server-6h4/machine-whoami",
-      "why": "makes the version machine command name the machine a token belongs to, and makes board init take that name, check the token and the data key with the board before writing anything, and keep --machine only as a check",
-      "commit": "fa26c0ee739cd697aeff75e4d5c1e2a73d6e67e1"
-    },
-    {
-      "branch": "feat/agent-board-local-server-6h4/init-force-verify",
-      "why": "makes board init --force check the token and the data key with the board whenever a URL and credentials are known, credentials-command mode included, and rewrite only the machine name of a kept config.json when the board names another",
-      "commit": "2ae8fda1c3123867ba969c0ccd0a59eb2680dd9f"
-    },
-    {
-      "branch": "feat/agent-board-local-server-keu/kill-who-fallback",
-      "why": "retries the worker shutdown signal with --kill-who on systemd older than 252, which refuses --kill-whom",
-      "commit": "dfbcc27939951975d34b61dc827c86e168937ffc"
-    },
-    {
-      "branch": "feat/agent-board-local-server-81f/no-self-signal-in-tests",
-      "why": "stops the worker tests sending SIGUSR2 to the test process, which made every core test run write Node diagnostic reports holding the whole environment, and git-ignores those reports",
-      "commit": "0169c700126aa87ccd65daadd4a42abab4c8d15a"
-    },
-    {
-      "branch": "feat/agent-board-local-server-bek/clear-group-kill-timer",
+      "branch": "feat/agent-board-local-server-x3q/clear-group-kill-timer",
       "why": "stops the worker signalling an agent's process group once it has ended (stored and cleared escalation timer, no terminate() after exit, groupExists guards in endGroup and runLimited)",
-      "commit": "c856fc6971a56c61e3ccdedc6cf744549436801d"
+      "commit": "d762573e817815938b73c5810abad6f4a26fad7e"
+    },
+    {
+      "branch": "feat/agent-board-local-server-x3q/allowed-hosts",
+      "why": "refuses requests whose Host is not the proxy's, so a page cannot reach the no-login backend by DNS rebinding",
+      "commit": "c8853c746480e0e2a6b8648734b96c570cb1afb7"
     }
   ],
-  "reason": "The fork's local-server branch is upstream 79255ce plus the included branches, changes a single-machine server needs and upstream does not have yet."
+  "reason": "The fork's local-server-v2 branch is the fork's main (3a546ec) plus the included branches, changes a single-machine server needs that upstream does not have yet. local-server stays at the pre-login pin b587c6a."
 }

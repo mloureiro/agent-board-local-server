@@ -6,10 +6,7 @@ use std::sync::Mutex;
 use crate::paths::{AppPaths, APP_IDENTIFIER};
 use crate::worker::credentials;
 
-pub const PROXY_SECRET: &str = "proxy-secret";
-
-pub const ACCOUNTS: [&str; 5] = [
-    PROXY_SECRET,
+pub const ACCOUNTS: [&str; 4] = [
     credentials::TOKEN_ACCOUNT,
     credentials::DATA_KEY_ACCOUNT,
     credentials::PENDING_TOKEN_ACCOUNT,
@@ -151,29 +148,9 @@ pub mod testing {
     }
 }
 
-/// The secret the backend trusts the proxy's headers with; created once per install.
-pub fn proxy_secret(store: &dyn SecretStore) -> Result<String, SecretError> {
-    if let Some(existing) = store.get(PROXY_SECRET)? {
-        return Ok(existing);
-    }
-    let bytes: [u8; 32] = rand::random();
-    let secret: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    store.set(PROXY_SECRET, &secret)?;
-    Ok(secret)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_proxy_secret_is_created_once_and_then_reused() {
-        let store = MemoryStore::default();
-        let first = proxy_secret(&store).unwrap();
-        assert_eq!(first.len(), 64);
-        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_eq!(proxy_secret(&store).unwrap(), first);
-    }
 
     #[test]
     fn only_the_default_root_uses_the_installed_apps_keychain_service() {

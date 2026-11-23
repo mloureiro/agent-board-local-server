@@ -4,7 +4,7 @@ use http::header::{HeaderMap, HeaderName, HeaderValue};
 pub const PAGE: &[(&str, &str)] = &[
     (
         "content-security-policy",
-        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
     ),
     ("referrer-policy", "no-referrer"),
     ("x-content-type-options", "nosniff"),

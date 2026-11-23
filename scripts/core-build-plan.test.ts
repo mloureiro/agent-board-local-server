@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   bunVersionError,
   caddyfileCopyError,
+  caddyfileRules,
   isBuildCurrent,
   missingTools,
   needsCheckoutRestore,
@@ -155,5 +156,15 @@ describe('the build options', () => {
   it('refuses an unknown option and a missing value', () => {
     expect(() => parseBuildArgs(['--force', 'x'])).toThrow('Unknown option --force');
     expect(() => parseBuildArgs(['--pin'])).toThrow('--pin needs a value');
+  });
+});
+
+describe('caddyfileRules', () => {
+  it('checks and fingerprints the Caddyfile copy for the build that stages into the app', () => {
+    expect(caddyfileRules(null)).toEqual({ check: true, fingerprint: true });
+  });
+
+  it('skips both for a build into a folder of its own, so a stage per commit survives a later pin move', () => {
+    expect(caddyfileRules('/tmp/stage')).toEqual({ check: false, fingerprint: false });
   });
 });

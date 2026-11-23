@@ -22,7 +22,7 @@ The app keeps its files under `~/Library/Application Support/dev.mloureiro.agent
   worker/          config/, state/, run/, bin/board, bin/board-local, worker-credentials, worker-credentials-pending
 ```
 
-Settings keys, all optional: `userName` (default the macOS login name, the board user), `dataDir` (default `data/` under the app folder), `backupDir` (default `backups/` under the app folder; an absolute path, outside an app bundle and not `dataDir` or inside it), `port` (default 4785; it is part of the origin the browser keeps its keys under, so it should not change), `startAtLogin` (default true; the release build registers a login item, a debug build never does), `workerPath` (default empty; a list of absolute directories that go on the worker's `PATH`, see "The worker"). A malformed or out-of-range value stops the app with a message instead of being replaced by a default. A key the build does not know stops it too, so an older build refuses a `settings.json` that holds a key added by a newer one. `settings.json` is read once, at start: after a change, Quit and open the app again.
+Settings keys, all optional: `userName` (default the macOS login name, the board user), `dataDir` (default `data/` under the app folder), `backupDir` (default `backups/` under the app folder; an absolute path, outside an app bundle and not `dataDir` or inside it), `port` (default 4785; it is part of the origin the browser keeps its keys under, so it should not change), `startAtLogin` (default true; the release build registers a login item, a debug build never does), `workerPath` (default empty; a list of absolute directories that go on the worker's `PATH`, see "The worker"). `..` is refused in `dataDir` and `backupDir`, and `backupDir` may not resolve into `dataDir`. A malformed or out-of-range value stops the app with a message instead of being replaced by a default. A key the build does not know stops it too, so an older build refuses a `settings.json` that holds a key added by a newer one. `settings.json` is read once, at start: after a change, Quit and open the app again.
 
 `AGENT_BOARD_LOCAL_SERVER_ROOT` moves the whole app folder, for running a build beside an installed one. Any root other than the default also gets its own Keychain service and leaves the login item alone.
 
@@ -138,13 +138,20 @@ The four gates (`format:check`, `lint`, `typecheck`, `test`) also run in CI on e
 
 ## Upgrading the pin
 
-A pin move copies the pinned `apps/frontend/Caddyfile` over `core.Caddyfile` in the same change. `pnpm core:build` fails until the two are equal. Then `pnpm test` runs the header drift test against the new pin.
+Each branch in `includes` carries a one-line `why`, and `reason` says why the pin names the fork.
 
-`pnpm core:build --pin <pin-file> --out <dir>` builds another pin into a staging folder of its own and never touches the app's staging. `cargo run --example headless -- --app-root <dir> --core <dir>` runs a build from such a folder on a data folder, so a database made by an older pin can be opened by the new one.
+1. `pnpm core:bump <commit>` takes a full 40-character commit of the fork. It fetches the fork in full into `.core/full.git`, copies the current pin to `core.pin.previous.json`, rewrites `commit` in `core.pin.json` and copies `apps/frontend/Caddyfile` at that commit over `core.Caddyfile`.
+2. Edit `includes` by hand to match the new commit.
+3. `pnpm core:bump --verify` checks that every include is an ancestor of the pinned commit, lists each one that is not and exits 1, then prints the change to `packages/shared/src/contract.mts` between `core.pin.previous.json` and the pin.
+4. Run the gates and `pnpm test:smoke`.
+
+`pnpm core:build --pin <pin-file> --out <dir>` builds another pin into a staging folder of its own, skipping the Caddyfile check, and never touches the app's staging.
 
 ## The smoke suite
 
 `pnpm test:smoke` builds and starts the headless runner (`cargo build --example headless`) with a scratch app root and drives the real backend through the proxy: health, sign-in, the machine API, event delivery, a foreign Host, loopback-only listeners and the at-rest column inventory (`at-rest/plain-columns.json` lists every stored column that is not sealed, each with a reason). It fails with "run pnpm core:build" when the staged core is not the pin.
+
+The upgrade case builds `core.pin.previous.json` into `.core/stage/<commit>/`, creates a card with that core on a scratch app root, then opens the same root with the app's core and checks the card is still listed and exactly one `pre-upgrade-*` backup was taken. The first run builds the previous pin and takes minutes; later runs reuse the stage. The build needs the Bun version the previous pin names and fails with a message naming it. The case fails when the previous pin names the same commit as the current one.
 
 The header-parity test runs the Caddy image named by `ARG CADDY_IMAGE` in the pinned `apps/frontend/Dockerfile` in Docker, pulling it on first use, and compares its answers with the proxy's for a fixed request list. Without Docker it fails; set `SKIP_CADDY_PARITY=1` to skip it on purpose.
 
@@ -156,7 +163,7 @@ The header-parity test runs the Caddy image named by `ARG CADDY_IMAGE` in the pi
 - `src-tauri/resources/frontend/`, `drizzle/` and `pglite/` (the three PGlite files the compiled backend cannot find on its own)
 - `src-tauri/resources/core-build.json`: the pin commit, the Bun version, the build time (`builtAt`, UTC) and the sha256 of every staged file
 
-The build refuses a pin whose `apps/frontend/Caddyfile` differs from `core.Caddyfile`, the committed copy the header drift test reads.
+The build refuses a pin whose `apps/frontend/Caddyfile` differs from `core.Caddyfile`, the committed copy the header drift test reads; a build with `--out` skips that check.
 
 A second run does nothing while that file matches the pin and every staged file.
 

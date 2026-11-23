@@ -18,6 +18,7 @@
     "test": "vitest --run && cargo test --manifest-path src-tauri/Cargo.toml",
     "test:smoke": "vitest --run --config vitest.smoke.config.ts",
     "core:build": "node scripts/build-core.ts",
+    "core:bump": "node scripts/core-bump.ts",
     "acceptance": "node scripts/acceptance.ts",
     "acceptance:binary": "bun build scripts/acceptance.ts --compile --target=bun-darwin-arm64 --outfile dist/acceptance"
   },

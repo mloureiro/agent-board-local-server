@@ -6,6 +6,7 @@ use tauri::{
 use tokio::task::AbortHandle;
 
 use super::session::{Enroller, Phase, Session};
+use crate::applog::LogFile;
 use crate::runtime::{Handle, Running};
 use crate::worker::control::Enrolled;
 use crate::worker::enrol::EnrolError;
@@ -55,7 +56,9 @@ pub fn open(app: &AppHandle) {
         .build();
     match built {
         Ok(window) => keep_open_while_connecting(&window, state.session.clone()),
-        Err(error) => eprintln!("cannot open the enrolment window: {error}"),
+        Err(error) => app
+            .state::<LogFile>()
+            .write(&format!("cannot open the enrolment window: {error}")),
     }
 }
 

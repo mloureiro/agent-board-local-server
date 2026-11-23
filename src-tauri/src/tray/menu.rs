@@ -111,7 +111,6 @@ impl TrayMenu {
 
 fn set_text(item: &MenuItem<Wry>, label: String) {
     if item.text().ok().as_deref() != Some(label.as_str()) {
-        eprintln!("{label}");
         let _ = item.set_text(label);
     }
 }

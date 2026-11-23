@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -6,6 +7,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::applog::LogFile;
 use crate::backend::{self, Healthz};
 use crate::paths::{AppPaths, Resources, Sidecars};
 use crate::proxy::{Proxy, ProxyConfig};
@@ -13,7 +15,7 @@ use crate::secrets::{proxy_secret, SecretError, SecretStore};
 use crate::settings::{Settings, SettingsError};
 use crate::supervisor::orphans;
 use crate::supervisor::process::stop_requested;
-use crate::supervisor::table::{BACKEND, PROXY, WORKER_LISTEN};
+use crate::supervisor::table::{changed_labels, BACKEND, PROXY, WORKER_LISTEN};
 use crate::supervisor::{
     supervise, Control, Launcher, ProcessSpec, RunningProcess, Spawned, Status, StatusBoard,
 };
@@ -65,6 +67,8 @@ pub struct Handle {
     stop_worker: watch::Sender<bool>,
     stop_proxy: watch::Sender<bool>,
     backend: Control,
+    stop_status: watch::Sender<bool>,
+    status_task: JoinHandle<()>,
     worker_task: JoinHandle<()>,
     proxy_task: JoinHandle<()>,
     backend_task: JoinHandle<()>,
@@ -97,6 +101,8 @@ impl Handle {
         let _ = self.proxy_task.await;
         self.backend.stop();
         let _ = self.backend_task.await;
+        let _ = self.stop_status.send(true);
+        let _ = self.status_task.await;
     }
 }
 
@@ -126,6 +132,13 @@ pub async fn start(
         .map_err(StartError::Secret)
         .map_err(blocked)?;
 
+    let (stop_status, status_stopped) = watch::channel(false);
+    let status_task = tokio::spawn(log_status_changes(
+        LogFile::new(config.paths.log_file("app")),
+        board.clone(),
+        status_stopped,
+    ));
+
     let worker = match (&config.worker, config.upstream_override) {
         (Some(worker), None) => prepare_worker(&config, worker, &board),
         _ => None,
@@ -140,6 +153,7 @@ pub async fn start(
             user_name: settings.user_name.clone(),
             secret: secret.clone(),
             frontend: config.resources.frontend(),
+            log: LogFile::new(config.paths.log_file(PROXY)),
             upstream_override: config.upstream_override,
         },
         board.clone(),
@@ -169,6 +183,8 @@ pub async fn start(
         ))
     };
     Ok(Handle {
+        stop_status,
+        status_task,
         stop_worker,
         stop_proxy,
         backend,
@@ -229,11 +245,33 @@ async fn run_worker(
     worker.stop().await;
 }
 
+async fn log_status_changes(
+    log: LogFile,
+    board: Arc<StatusBoard>,
+    mut stop: watch::Receiver<bool>,
+) {
+    let mut changes = board.subscribe();
+    let mut seen = BTreeMap::new();
+    loop {
+        for line in changed_labels(&board, &mut seen) {
+            log.write(&line);
+        }
+        tokio::select! {
+            changed = changes.changed() => if changed.is_err() { break },
+            () = stop_requested(&mut stop) => break,
+        }
+    }
+    for line in changed_labels(&board, &mut seen) {
+        log.write(&line);
+    }
+}
+
 struct ProxySetup {
     port: u16,
     user_name: String,
     secret: String,
     frontend: std::path::PathBuf,
+    log: LogFile,
     upstream_override: Option<u16>,
 }
 
@@ -265,6 +303,7 @@ async fn serve_proxy(setup: ProxySetup, board: Arc<StatusBoard>, mut stop: watch
         user_name: setup.user_name,
         secret: setup.secret,
         frontend: setup.frontend,
+        log: setup.log,
         upstream_port: Arc::new(move || setup.upstream_override.or_else(|| running_port(&lookup))),
     })
     .await;

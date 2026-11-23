@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 
 use crate::lock::{self, LockError};
 use crate::login_item;
-use crate::paths::{has_parent_component, is_within, resolve, AppPaths, APP_IDENTIFIER};
+use crate::paths::{has_parent_component, identity, is_within, resolve, AppPaths, APP_IDENTIFIER};
 use crate::secrets::{Keychain, SecretStore, ACCOUNTS};
 use crate::settings::Settings;
 
@@ -49,13 +49,45 @@ pub struct Inputs<'a> {
     pub home: Option<&'a Path>,
 }
 
-fn deletable(root: &Path, home: Option<&Path>) -> bool {
+fn mirrors_home(root: &Path, home: &Path) -> bool {
+    let home = resolve(home);
+    home.ancestors().any(|ancestor| {
+        let Ok(relative) = ancestor.strip_prefix("/") else {
+            return false;
+        };
+        identity(ancestor).is_some() && identity(&root.join(relative)) == identity(ancestor)
+    })
+}
+
+pub fn deletable(root: &Path, home: Option<&Path>) -> bool {
     let bare: PathBuf = root.components().collect();
     let is_link = fs::symlink_metadata(&bare).is_ok_and(|meta| meta.is_symlink());
+    let resolved = resolve(root);
     !has_parent_component(root)
         && !is_link
-        && resolve(root).parent().is_some()
-        && home.is_none_or(|home| !is_within(home, root))
+        && resolved.parent().is_some()
+        && home.is_none_or(|home| !is_within(home, root) && !mirrors_home(root, home))
+}
+
+fn has_marker(root: &Path) -> bool {
+    fs::symlink_metadata(AppPaths::new(root).settings_file()).is_ok_and(|meta| meta.is_file())
+}
+
+fn refusal(root: &Path, home: Option<&Path>) -> Option<String> {
+    if !deletable(root, home) {
+        return Some(format!(
+            "{} is not removed: it is a symlink, has a .. component, holds the home folder or is a filesystem root",
+            root.display()
+        ));
+    }
+    let missing = fs::symlink_metadata(root).is_err_and(|e| e.kind() == io::ErrorKind::NotFound);
+    if !missing && !has_marker(root) {
+        return Some(format!(
+            "{} is not removed: it does not look like this app's folder (no settings.json)",
+            root.display()
+        ));
+    }
+    None
 }
 
 pub fn plan(inputs: &Inputs) -> Vec<Step> {
@@ -75,11 +107,8 @@ pub fn plan(inputs: &Inputs) -> Vec<Step> {
     if !inputs.delete_data {
         return steps;
     }
-    if !deletable(inputs.root, inputs.home) {
-        steps.push(Step::Note(format!(
-            "{} is not removed: it is a symlink, has a .. component, holds the home folder or is a filesystem root",
-            inputs.root.display()
-        )));
+    if let Some(reason) = refusal(inputs.root, inputs.home) {
+        steps.push(Step::Note(reason));
         return steps;
     }
     match inputs.settings {
@@ -202,6 +231,23 @@ fn boot_out_login_item() {
         .status();
 }
 
+fn hold_lock(
+    paths: &AppPaths,
+    root: &Path,
+    delete_data: bool,
+    home: Option<&Path>,
+) -> Result<(bool, Option<lock::Lock>), io::Error> {
+    let refused = delete_data && refusal(root, home).is_some();
+    if refused || !root.exists() {
+        return Ok((false, None));
+    }
+    match lock::acquire(&paths.lock_file()) {
+        Ok(held) => Ok((false, Some(held))),
+        Err(LockError::AlreadyRunning) => Ok((true, None)),
+        Err(LockError::Io(error)) => Err(error),
+    }
+}
+
 pub fn run(options: Options) -> i32 {
     let Some(root) = AppPaths::configured_root() else {
         eprintln!("HOME is not set; the app root cannot be found");
@@ -212,20 +258,16 @@ pub fn run(options: Options) -> i32 {
         return 1;
     };
     let paths = AppPaths::new(&root);
-    let (running, _lock) = if root.exists() {
-        match lock::acquire(&paths.lock_file()) {
-            Ok(held) => (false, Some(held)),
-            Err(LockError::AlreadyRunning) => (true, None),
-            Err(LockError::Io(error)) => {
-                eprintln!("cannot take the app lock: {error}");
-                return 1;
-            }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let held = hold_lock(&paths, &root, options.delete_data, home.as_deref());
+    let (running, _lock) = match held {
+        Ok(held) => held,
+        Err(error) => {
+            eprintln!("cannot take the app lock: {error}");
+            return 1;
         }
-    } else {
-        (false, None)
     };
     let settings = options.delete_data.then(|| read_settings(&paths)).flatten();
-    let home = std::env::var_os("HOME").map(PathBuf::from);
     let steps = plan(&Inputs {
         root: &root,
         default_root: AppPaths::default_root().as_deref() == Some(root.as_path()),
@@ -405,6 +447,9 @@ mod tests {
     }
 
     fn removes_folder(root: &Path, home: &Path) -> bool {
+        if root.is_dir() && !root.is_symlink() {
+            let _ = fs::write(AppPaths::new(root).settings_file(), "{}");
+        }
         let mut wanted = inputs(root, None);
         wanted.home = Some(home);
         wanted.delete_data = true;
@@ -468,6 +513,7 @@ mod tests {
         let root = scratch.path().join("app");
         fs::create_dir_all(root.join("data")).unwrap();
         fs::write(root.join("data/file"), "x").unwrap();
+        fs::write(AppPaths::new(&root).settings_file(), "{}").unwrap();
         let outside = scratch.path().join("outside");
         fs::create_dir_all(&outside).unwrap();
         let agents = scratch.path().join("LaunchAgents");
@@ -534,5 +580,123 @@ mod tests {
 
         fs::write(paths.settings_file(), "{ nope").unwrap();
         assert!(read_settings(&paths).is_none());
+    }
+
+    #[test]
+    fn a_refused_root_gets_no_lock_file_and_an_accepted_one_does() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("app");
+        fs::create_dir_all(&root).unwrap();
+        let paths = AppPaths::new(&root);
+        let home = scratch.path().join("home");
+
+        let refused = hold_lock(&paths, &root, true, Some(&home)).unwrap();
+        assert!(refused.1.is_none());
+        assert!(!paths.lock_file().exists());
+
+        let at_home = hold_lock(
+            &AppPaths::new(scratch.path()),
+            scratch.path(),
+            true,
+            Some(&root),
+        )
+        .unwrap();
+        assert!(at_home.1.is_none());
+        assert!(!AppPaths::new(scratch.path()).lock_file().exists());
+
+        fs::write(paths.settings_file(), "{}").unwrap();
+        let accepted = hold_lock(&paths, &root, true, Some(&home)).unwrap();
+        assert!(accepted.1.is_some());
+        assert!(paths.lock_file().exists());
+    }
+
+    fn real_home() -> PathBuf {
+        PathBuf::from(std::env::var_os("HOME").unwrap())
+    }
+
+    #[test]
+    fn a_firmlink_spelling_of_the_home_folder_or_above_is_refused() {
+        let data_volume = Path::new("/System/Volumes/Data");
+        let home = real_home();
+        if !data_volume.exists() || !home.starts_with("/Users") {
+            return;
+        }
+        let spelled = data_volume.join(home.strip_prefix("/").unwrap());
+        for root in [
+            spelled.clone(),
+            spelled.parent().unwrap().to_path_buf(),
+            data_volume.to_path_buf(),
+        ] {
+            assert!(!deletable(&root, Some(&home)), "{}", root.display());
+            let mut wanted = inputs(&root, None);
+            wanted.home = Some(&home);
+            wanted.delete_data = true;
+            assert!(
+                !plan(&wanted)
+                    .iter()
+                    .any(|step| matches!(step, Step::RemoveAppFolder(_))),
+                "{}",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_root_that_is_the_same_directory_as_the_home_or_a_parent_of_it_is_refused() {
+        let scratch = tempfile::tempdir().unwrap();
+        let home = scratch.path().join("a/b/home");
+        fs::create_dir_all(&home).unwrap();
+        let alias = scratch.path().join("alias");
+        std::os::unix::fs::symlink(scratch.path().join("a"), &alias).unwrap();
+        let through_alias = alias.join("b/home");
+        let sibling = scratch.path().join("a/b/other");
+        fs::create_dir_all(&sibling).unwrap();
+
+        assert!(!deletable(&through_alias, Some(&home)));
+        assert!(!deletable(&alias.join("b"), Some(&home)));
+        assert!(deletable(&sibling, Some(&home)));
+        assert!(deletable(&alias.join("b/other"), Some(&home)));
+    }
+
+    #[test]
+    fn a_root_without_a_settings_file_is_refused_and_one_with_it_is_removed() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("app");
+        fs::create_dir_all(&root).unwrap();
+        let home = scratch.path().join("home");
+        let mut wanted = inputs(&root, None);
+        wanted.home = Some(&home);
+        wanted.delete_data = true;
+
+        let refused = plan(&wanted);
+        assert!(!refused
+            .iter()
+            .any(|step| matches!(step, Step::RemoveAppFolder(_))));
+        assert!(refused
+            .iter()
+            .any(|s| matches!(s, Step::Note(t) if t.contains("does not look like"))));
+
+        fs::create_dir(AppPaths::new(&root).settings_file()).unwrap();
+        assert!(!plan(&wanted)
+            .iter()
+            .any(|step| matches!(step, Step::RemoveAppFolder(_))));
+        fs::remove_dir(AppPaths::new(&root).settings_file()).unwrap();
+
+        fs::write(AppPaths::new(&root).settings_file(), "{}").unwrap();
+        assert!(plan(&wanted)
+            .iter()
+            .any(|step| matches!(step, Step::RemoveAppFolder(_))));
+    }
+
+    #[test]
+    fn a_settings_file_that_is_a_symlink_is_not_a_marker() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("app");
+        fs::create_dir_all(&root).unwrap();
+        let real = scratch.path().join("real.json");
+        fs::write(&real, "{}").unwrap();
+        std::os::unix::fs::symlink(&real, AppPaths::new(&root).settings_file()).unwrap();
+
+        assert!(refusal(&root, Some(&scratch.path().join("home"))).is_some());
     }
 }

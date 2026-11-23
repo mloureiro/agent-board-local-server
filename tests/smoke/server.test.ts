@@ -4,6 +4,7 @@ import { request as httpRequest } from 'node:http';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { listenAddresses } from '../../scripts/acceptance-checks.ts';
 import { killStrays, repoRoot, requireStagedCore, scratchDir, startRunner, type Runner } from './harness.ts';
 
 interface Database {
@@ -148,13 +149,10 @@ describe('the built backend behind the proxy', () => {
     const listing = spawnSync('lsof', ['-nP', '-a', '-iTCP', '-sTCP:LISTEN', '-p', pids.join(',')], {
       encoding: 'utf8',
     });
-    const addresses = listing.stdout
-      .split('\n')
-      .slice(1)
-      .map((line) => line.match(/TCP (\S+) \(LISTEN\)/)?.[1])
-      .filter((address): address is string => address !== undefined);
 
-    expect(addresses.sort()).toEqual([`127.0.0.1:${runner.proxyPort}`, `127.0.0.1:${runner.backendPort}`].sort());
+    expect(listenAddresses(listing.stdout).sort()).toEqual(
+      [`127.0.0.1:${runner.proxyPort}`, `127.0.0.1:${runner.backendPort}`].sort(),
+    );
   });
 
   it('seals or knowingly leaves plain every stored column', async () => {

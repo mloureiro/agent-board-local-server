@@ -1,17 +1,19 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io::BufRead;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use agent_board_local_server::activity::Activity;
 use agent_board_local_server::lock::{self, LockError};
-use agent_board_local_server::paths::{AppPaths, Resources, Sidecars, APP_IDENTIFIER};
+use agent_board_local_server::paths::{AppPaths, Resources, Sidecars};
 use agent_board_local_server::runtime::{self, Config, WorkerConfig};
 use agent_board_local_server::secrets::{Keychain, MemoryStore, SecretStore};
 use agent_board_local_server::supervisor::table::PROXY;
 use agent_board_local_server::supervisor::{changed_labels, Status, StatusBoard};
-use agent_board_local_server::worker::credentials::run_helper_if_requested;
+use agent_board_local_server::uninstall;
+use agent_board_local_server::worker::credentials::{helper_keychain, run_helper_if_requested};
 use tokio::signal::unix::{signal, SignalKind};
 
 const PACKAGING: &str = env!("CARGO_MANIFEST_DIR");
@@ -76,20 +78,6 @@ fn parse() -> Result<Args, String> {
     })
 }
 
-/// One Keychain service per scratch app root, so runs never share or touch the app's own items.
-fn worker_keychain(app_root: &Path) -> Keychain {
-    Keychain::with_service(format!("{APP_IDENTIFIER}.headless:{}", app_root.display()))
-}
-
-/// The CLI runs this executable as its credentials command with the worker environment, which names the root.
-fn helper_keychain() -> Keychain {
-    let root = std::env::var_os("AGENT_BOARD_CONFIG_DIR")
-        .map(PathBuf::from)
-        .and_then(|config| Some(config.parent()?.parent()?.to_path_buf()))
-        .unwrap_or_default();
-    worker_keychain(&root)
-}
-
 fn read_credentials_from_stdin() -> Result<(String, String), String> {
     let mut lines = std::io::stdin().lock().lines();
     let mut next = |what: &str| {
@@ -101,9 +89,46 @@ fn read_credentials_from_stdin() -> Result<(String, String), String> {
     Ok((next("token")?, next("data key")?))
 }
 
+fn uninstall_if_requested() -> Option<i32> {
+    let mut rest: Vec<OsString> = Vec::new();
+    let mut app_root = None;
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--app-root" {
+            app_root = Some(args.next()?);
+        } else {
+            rest.push(arg);
+        }
+    }
+    match uninstall::parse_args(&rest)? {
+        Ok(options) => {
+            let Some(root) = app_root.and_then(|root| std::path::absolute(root).ok()) else {
+                eprintln!("--uninstall needs --app-root <dir>");
+                return Some(2);
+            };
+            if AppPaths::default_root().as_deref() == Some(root.as_path()) {
+                eprintln!("the runner never uninstalls the default app root");
+                return Some(2);
+            }
+            Some(uninstall::run_at(&root, options))
+        }
+        Err(usage) => {
+            eprintln!("{usage}");
+            Some(2)
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    if let Some(code) = run_helper_if_requested(std::env::args_os(), &helper_keychain()) {
+    let helper_store = helper_keychain();
+    if let Some(code) = run_helper_if_requested(
+        std::env::args_os(),
+        helper_store.as_ref().map(|store| store as &dyn SecretStore),
+    ) {
+        std::process::exit(code);
+    }
+    if let Some(code) = uninstall_if_requested() {
         std::process::exit(code);
     }
     let args = match parse() {
@@ -127,7 +152,7 @@ async fn main() {
     };
 
     let worker_secrets: Arc<dyn SecretStore> = if args.worker {
-        Arc::new(worker_keychain(&args.app_root))
+        Arc::new(Keychain::for_root(&args.app_root))
     } else {
         Arc::new(MemoryStore::default())
     };

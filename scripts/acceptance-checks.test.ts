@@ -7,6 +7,8 @@ import {
   listenAddresses,
   parseProcessRows,
   runsAppExecutable,
+  sameSigner,
+  signerOf,
   survivors,
 } from './acceptance-checks.ts';
 
@@ -112,5 +114,32 @@ describe('runsAppExecutable()', () => {
 
   it.each(cases)('%s', (_name, command, expected) => {
     expect(runsAppExecutable(command, executable)).toBe(expected);
+  });
+});
+
+describe('the signer of a bundle part', () => {
+  const adhoc = ['Executable=/x/board', 'Identifier=board', 'Signature=adhoc', 'TeamIdentifier=not set'].join('\n');
+  const named = [
+    'Executable=/x/board',
+    'Signature size=1800',
+    'Authority=Agent Board Local Signing',
+    'TeamIdentifier=not set',
+  ].join('\n');
+
+  it('reads adhoc and the authority name', () => {
+    expect(signerOf(adhoc)).toBe('adhoc');
+    expect(signerOf(named)).toBe('Agent Board Local Signing');
+  });
+
+  it('reads no signer from an unsigned part', () => {
+    expect(signerOf('Executable=/x/board\ncode object is not signed at all')).toBeNull();
+  });
+
+  it('accepts three equal signers and refuses a mixed or missing one', () => {
+    expect(sameSigner(['adhoc', 'adhoc', 'adhoc'])).toBe(true);
+    expect(sameSigner(['Name', 'Name', 'Name'])).toBe(true);
+    expect(sameSigner(['Name', 'adhoc', 'Name'])).toBe(false);
+    expect(sameSigner(['adhoc', null, 'adhoc'])).toBe(false);
+    expect(sameSigner([])).toBe(false);
   });
 });

@@ -11,8 +11,10 @@ import {
   killStrays,
   repoRoot,
   requireStagedCore,
+  rootKeychainService,
   startRunner,
   tearDown,
+  uninstallScratch,
   type Runner,
 } from './harness.ts';
 
@@ -53,13 +55,8 @@ describe('worker enrolment against the built board', () => {
     });
 
   const keychainHas = (account: string) =>
-    spawnSync('security', [
-      'find-generic-password',
-      '-s',
-      `dev.mloureiro.agent-board-local-server.headless:${runner.appRoot}`,
-      '-a',
-      account,
-    ]).status === 0;
+    spawnSync('security', ['find-generic-password', '-s', rootKeychainService(runner.appRoot), '-a', account])
+      .status === 0;
 
   const machineInConfig = (): unknown =>
     (JSON.parse(readFileSync(join(runner.appRoot, 'worker/config/config.json'), 'utf8')) as { machine: unknown })
@@ -94,14 +91,11 @@ describe('worker enrolment against the built board', () => {
     dataKeyLine = `AGENT_BOARD_DATA_KEY=${shared.encodeDataKey(dataKey)}`;
   }, 300_000);
 
-  const deleteKeychainItems = () => {
-    if (runner === undefined) return;
-    const service = `dev.mloureiro.agent-board-local-server.headless:${runner.appRoot}`;
-    for (let item = 0; item < 4; item += 1)
-      if (spawnSync('security', ['delete-generic-password', '-s', service], { stdio: 'ignore' }).status !== 0) break;
+  const uninstallRoot = () => {
+    if (runner !== undefined) uninstallScratch(runner.appRoot);
   };
 
-  afterAll(() => tearDown(() => runner?.stop(), deleteKeychainItems, killStrays), 60_000);
+  afterAll(() => tearDown(() => runner?.stop(), uninstallRoot, killStrays), 60_000);
 
   it('connects a token issued to another name under the name the board gives, then follows a token for a third', async () => {
     runner.writeLine(`AGENT_BOARD_TOKEN=${await issue('tnk_one')}`);
@@ -142,7 +136,7 @@ describe('worker enrolment against the built board', () => {
   }, 180_000);
 
   it('never serves a pending pair through the link the running worker uses', () => {
-    const service = `dev.mloureiro.agent-board-local-server.headless:${runner.appRoot}`;
+    const service = rootKeychainService(runner.appRoot);
     const plant = (account: string, value: string) =>
       spawnSync('security', ['add-generic-password', '-U', '-A', '-s', service, '-a', account, '-w', value]);
     expect(plant('worker-token-pending', 'abm_pending-marker').status).toBe(0);

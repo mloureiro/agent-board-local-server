@@ -1,8 +1,8 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::secrets::{SecretError, SecretStore};
+use crate::secrets::{Keychain, SecretError, SecretStore};
 
 pub const TOKEN_ACCOUNT: &str = "worker-token";
 pub const DATA_KEY_ACCOUNT: &str = "worker-data-key";
@@ -117,9 +117,20 @@ pub fn helper_output(store: &dyn SecretStore, pair: Pair) -> Result<String, Help
     ))
 }
 
+pub const CONFIG_DIR_ENV: &str = "AGENT_BOARD_CONFIG_DIR";
+
+pub fn root_of_config_dir(config_dir: Option<OsString>) -> Option<PathBuf> {
+    let config_dir = PathBuf::from(config_dir?);
+    Some(config_dir.parent()?.parent()?.to_path_buf())
+}
+
+pub fn helper_keychain() -> Option<Keychain> {
+    root_of_config_dir(std::env::var_os(CONFIG_DIR_ENV)).map(|root| Keychain::for_root(&root))
+}
+
 pub fn run_helper_if_requested(
     args: impl IntoIterator<Item = OsString>,
-    store: &dyn SecretStore,
+    store: Option<&dyn SecretStore>,
 ) -> Option<i32> {
     let mut args = args.into_iter();
     let program = args.next()?;
@@ -143,6 +154,10 @@ pub fn run_helper_if_requested(
         eprintln!("{HELPER_FLAG} takes no other argument");
         return Some(2);
     }
+    let Some(store) = store else {
+        eprintln!("{CONFIG_DIR_ENV} is not set");
+        return Some(1);
+    };
     match helper_output(store, pair) {
         Ok(lines) => {
             print!("{lines}");
@@ -253,18 +268,18 @@ mod tests {
         let store = MemoryStore::default();
         let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
 
-        assert_eq!(run_helper_if_requested(args(&[]), &store), None);
-        assert_eq!(run_helper_if_requested(args(&["app"]), &store), None);
+        assert_eq!(run_helper_if_requested(args(&[]), Some(&store)), None);
+        assert_eq!(run_helper_if_requested(args(&["app"]), Some(&store)), None);
         assert_eq!(
-            run_helper_if_requested(args(&["app", "--other"]), &store),
+            run_helper_if_requested(args(&["app", "--other"]), Some(&store)),
             None
         );
         assert_eq!(
-            run_helper_if_requested(args(&["app", HELPER_FLAG, "extra"]), &store),
+            run_helper_if_requested(args(&["app", HELPER_FLAG, "extra"]), Some(&store)),
             Some(2)
         );
         assert_eq!(
-            run_helper_if_requested(args(&["app", HELPER_FLAG]), &store),
+            run_helper_if_requested(args(&["app", HELPER_FLAG]), Some(&store)),
             Some(1)
         );
     }
@@ -275,15 +290,15 @@ mod tests {
         let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
 
         assert_eq!(
-            run_helper_if_requested(args(&["/app/worker/worker-credentials"]), &store),
+            run_helper_if_requested(args(&["/app/worker/worker-credentials"]), Some(&store)),
             Some(1)
         );
         assert_eq!(
-            run_helper_if_requested(args(&["/app/worker/worker-credentials", "x"]), &store),
+            run_helper_if_requested(args(&["/app/worker/worker-credentials", "x"]), Some(&store)),
             Some(2)
         );
         assert_eq!(
-            run_helper_if_requested(args(&["/app/worker/other"]), &store),
+            run_helper_if_requested(args(&["/app/worker/other"]), Some(&store)),
             None
         );
     }
@@ -294,15 +309,39 @@ mod tests {
         let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
 
         assert_eq!(
-            run_helper_if_requested(args(&["/app/worker/worker-credentials-pending"]), &store),
+            run_helper_if_requested(
+                args(&["/app/worker/worker-credentials-pending"]),
+                Some(&store)
+            ),
             Some(1)
         );
         assert_eq!(
             run_helper_if_requested(
                 args(&["/app/worker/worker-credentials-pending", "x"]),
-                &store
+                Some(&store)
             ),
             Some(2)
         );
+    }
+
+    #[test]
+    fn the_helper_without_a_keychain_exits_one() {
+        let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
+
+        assert_eq!(
+            run_helper_if_requested(args(&["app", HELPER_FLAG]), None),
+            Some(1)
+        );
+        assert_eq!(run_helper_if_requested(args(&["app"]), None), None);
+    }
+
+    #[test]
+    fn the_root_is_two_levels_above_the_config_directory_and_absent_without_it() {
+        assert_eq!(
+            root_of_config_dir(Some("/scratch/root/worker/config".into())),
+            Some(PathBuf::from("/scratch/root"))
+        );
+        assert_eq!(root_of_config_dir(None), None);
+        assert_eq!(root_of_config_dir(Some("/".into())), None);
     }
 }

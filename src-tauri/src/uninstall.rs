@@ -253,6 +253,11 @@ pub fn run(options: Options) -> i32 {
         eprintln!("HOME is not set; the app root cannot be found");
         return 1;
     };
+    run_at(&root, options)
+}
+
+pub fn run_at(root: &Path, options: Options) -> i32 {
+    let root = root.to_path_buf();
     let Some(launch_agents) = login_item::launch_agents_dir() else {
         eprintln!("HOME is not set; the login item cannot be found");
         return 1;

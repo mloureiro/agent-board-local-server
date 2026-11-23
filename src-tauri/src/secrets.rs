@@ -4,8 +4,17 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::paths::{AppPaths, APP_IDENTIFIER};
+use crate::worker::credentials;
 
 pub const PROXY_SECRET: &str = "proxy-secret";
+
+pub const ACCOUNTS: [&str; 5] = [
+    PROXY_SECRET,
+    credentials::TOKEN_ACCOUNT,
+    credentials::DATA_KEY_ACCOUNT,
+    credentials::PENDING_TOKEN_ACCOUNT,
+    credentials::PENDING_DATA_KEY_ACCOUNT,
+];
 
 #[derive(Debug)]
 pub struct SecretError(pub String);

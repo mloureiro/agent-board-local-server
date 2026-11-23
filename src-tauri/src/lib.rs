@@ -7,6 +7,7 @@ pub mod core_build;
 pub mod enrol_window;
 pub mod localtime;
 pub mod lock;
+pub mod login_item;
 pub mod paths;
 pub mod proxy;
 pub mod runtime;
@@ -14,6 +15,7 @@ pub mod secrets;
 pub mod settings;
 pub mod supervisor;
 pub mod tray;
+pub mod uninstall;
 pub mod worker;
 
 pub use app::run;

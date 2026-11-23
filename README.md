@@ -42,6 +42,12 @@ The app has no window and no Dock icon. The menu has "Open board", one line per 
 
 While a row is failing, the menu bar icon carries a `!` mark and its tooltip is that row's line. A row is failing when it is not started, when it crashed and no restart is pending, or when the Worker line shows "refused — …" or "error — …". The first such row in menu order is the one shown, and a restart in progress does not count. The mark and the tooltip clear when every row has recovered. A disabled line near the bottom of the menu reads "core `<7 characters of the pinned commit>` · core built `<date>`", or "core unknown" when the build manifest cannot be read.
 
+## Login item and abnormal exits
+
+With `startAtLogin` on, the release build writes its own launch agent, `~/Library/LaunchAgents/dev.mloureiro.agent-board-local-server.plist`, and removes the `Agent Board Server.plist` an earlier build wrote. The agent runs the app at login and has `KeepAlive` on an unsuccessful exit: when the login item started the app and it then crashes or is force quit, launchd starts it again after about ten seconds, and the start sweeps the backend and worker processes the dead app left behind. Quit from the tray, a log-out and a second launch that finds the app running all exit cleanly and are not relaunched. The change takes effect at the next login. Turning `startAtLogin` off removes the file; a debug build and a non-default root never touch it.
+
+An app opened from Finder that crashes is not relaunched. Its leftover processes are stopped at the next launch or login.
+
 ## Backup and restore
 
 A backup is a copy of `data/pglite/`. The app stops the backend for the copy and starts it again, so for a few seconds the board answers 502 and a dispatch tick that falls in that window may fail. Backups go to `backups/` under the app folder, or to the folder named by `backupDir` in `settings.json`. A folder on another volume makes the copy a full copy instead of a clone, and the stop lasts longer.
@@ -107,6 +113,19 @@ ln -s "$HOME/Library/Application Support/dev.mloureiro.agent-board-local-server/
 
 "Check worker" in the tray runs the bundled `board doctor --json` with the worker's environment, leaves out the checks that do not apply to a worker the app supervises (launchd agents and the core's own lookup of tools), and looks up `claude` and `gh` itself on the worker's `PATH`, `workerPath` included. The result goes to `logs/worker-check.log`, which the app opens, and the Worker line shows "check: N problems" ("check: 1 problem" for one). The item is enabled once the worker is connected; the next dispatch tick replaces the Worker line.
 
+## Uninstall
+
+Quit the app first, then run the executable inside the `.app` (the path below is for an app in `/Applications`):
+
+```
+"/Applications/Agent Board Server.app/Contents/MacOS/agent-board-local-server" --uninstall
+"/Applications/Agent Board Server.app/Contents/MacOS/agent-board-local-server" --uninstall --delete-data
+```
+
+`--uninstall` removes the login item (this build's file and the one an earlier build wrote) and the app's Keychain items for the configured root: the proxy secret, the machine token and the data key, including a pair being checked. The app folder, the data and the backups stay. `--delete-data` also removes the app folder, but only when it holds this app's `settings.json` (a regular file, not a symlink); otherwise it prints that the folder does not look like this app's and leaves it. It also leaves a root that is a symlink, has a `..` component, is the home folder or any folder above it, however the path is spelled, and takes no lock in a root it refuses. A `dataDir` or `backupDir` outside the app folder is printed and left for you to remove. With the app running it prints "quit the app first" and changes nothing. Any other argument prints a usage line and exits 2.
+
+With `AGENT_BOARD_LOCAL_SERVER_ROOT` set it acts on that root and its own Keychain service, and leaves the login item alone. An ad-hoc signed build can raise the Keychain prompt once per item; allow each. The `.app` itself is removed by hand.
+
 ## Requirements
 
 - Node 24 and pnpm
@@ -140,8 +159,8 @@ The four gates (`format:check`, `lint`, `typecheck`, `test`) also run in CI on e
 
 Each branch in `includes` carries a one-line `why`, and `reason` says why the pin names the fork.
 
-1. `pnpm core:bump <commit>` takes a full 40-character commit of the fork. It fetches the fork in full into `.core/full.git`, copies the current pin to `core.pin.previous.json`, rewrites `commit` in `core.pin.json` and copies `apps/frontend/Caddyfile` at that commit over `core.Caddyfile`.
-2. Edit `includes` by hand to match the new commit.
+1. If an include changes with the new commit, edit `includes` in `core.pin.json` first: `pnpm core:bump <commit>` refuses before writing anything when an existing include is not an ancestor of the new commit.
+2. `pnpm core:bump <commit>` takes a full 40-character commit of the fork. It fetches the fork in full into `.core/full.git`, copies the current pin to `core.pin.previous.json`, rewrites `commit` in `core.pin.json` and copies `apps/frontend/Caddyfile` at that commit over `core.Caddyfile`.
 3. `pnpm core:bump --verify` checks that every include is an ancestor of the pinned commit, lists each one that is not and exits 1, then prints the change to `packages/shared/src/contract.mts` between `core.pin.previous.json` and the pin.
 4. Run the gates and `pnpm test:smoke`.
 

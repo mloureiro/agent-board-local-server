@@ -118,7 +118,7 @@ pub fn has_parent_component(path: &Path) -> bool {
     path.components().any(|part| part == Component::ParentDir)
 }
 
-fn resolve(path: &Path) -> PathBuf {
+pub fn resolve(path: &Path) -> PathBuf {
     let mut rest = Vec::new();
     let mut base = path;
     loop {
@@ -135,8 +135,21 @@ fn resolve(path: &Path) -> PathBuf {
     }
 }
 
+pub fn identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    path.metadata().ok().map(|meta| (meta.dev(), meta.ino()))
+}
+
 pub fn is_within(dir: &Path, root: &Path) -> bool {
-    resolve(dir).starts_with(resolve(root))
+    let resolved = resolve(dir);
+    if resolved.starts_with(resolve(root)) {
+        return true;
+    }
+    identity(root).is_some_and(|wanted| {
+        resolved
+            .ancestors()
+            .any(|ancestor| identity(ancestor) == Some(wanted))
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -192,5 +205,37 @@ impl Resources {
 
     pub fn pglite_assets(&self) -> PathBuf {
         self.root.join("resources/pglite")
+    }
+}
+
+#[cfg(test)]
+mod containment_tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn a_path_is_inside_a_root_by_directory_identity_not_only_by_spelling() {
+        let scratch = tempfile::tempdir().unwrap();
+        let real = scratch.path().join("real/inner");
+        fs::create_dir_all(&real).unwrap();
+        let alias = scratch.path().join("alias");
+        std::os::unix::fs::symlink(scratch.path().join("real"), &alias).unwrap();
+
+        assert!(is_within(&alias.join("inner/new/deep"), &real));
+        assert!(is_within(&real.join("new"), &alias.join("inner")));
+        assert!(!is_within(&scratch.path().join("real/other"), &real));
+        assert!(!is_within(&real, &scratch.path().join("missing")));
+    }
+
+    #[test]
+    fn the_data_volume_spelling_of_a_folder_is_inside_that_folder() {
+        let data_volume = Path::new("/System/Volumes/Data");
+        let users = Path::new("/Users");
+        if !data_volume.join("Users").exists() || !users.exists() {
+            return;
+        }
+        assert!(is_within(&data_volume.join("Users/someone"), users));
+        assert!(is_within(users, &data_volume.join("Users")));
     }
 }

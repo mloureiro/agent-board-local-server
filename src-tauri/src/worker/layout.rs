@@ -18,7 +18,8 @@ pub fn ensure(paths: &AppPaths, board: &Path, app_executable: &Path) -> io::Resu
     }
     point(&paths.worker_board(), board)?;
     write_script(&paths.worker_board_local(), &board_local::script(paths))?;
-    point(&paths.worker_credentials(), app_executable)
+    point(&paths.worker_credentials(), app_executable)?;
+    point(&paths.worker_credentials_pending(), app_executable)
 }
 
 fn write_script(file: &Path, content: &str) -> io::Result<()> {
@@ -64,6 +65,10 @@ mod tests {
         ensure(&paths, &first, &app).unwrap();
         assert_eq!(fs::read_link(paths.worker_board()).unwrap(), first);
         assert_eq!(fs::read_link(paths.worker_credentials()).unwrap(), app);
+        assert_eq!(
+            fs::read_link(paths.worker_credentials_pending()).unwrap(),
+            app
+        );
         for sub in ["config", "state", "run"] {
             assert!(paths.worker_dir().join(sub).is_dir(), "{sub}");
         }

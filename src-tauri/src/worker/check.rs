@@ -179,8 +179,22 @@ pub async fn run(board: &Path, env: &BTreeMap<String, String>, log: &Path) -> us
     problems
 }
 
+pub fn summary(problems: usize) -> String {
+    match problems {
+        1 => "check: 1 problem".into(),
+        count => format!("check: {count} problems"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_summary_is_singular_for_one_problem_and_plural_otherwise() {
+        assert_eq!(super::summary(0), "check: 0 problems");
+        assert_eq!(super::summary(1), "check: 1 problem");
+        assert_eq!(super::summary(2), "check: 2 problems");
+    }
+
     use std::os::unix::fs::OpenOptionsExt;
 
     use super::*;

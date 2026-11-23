@@ -23,18 +23,13 @@ pub trait Launcher: Send {
 }
 
 pub trait Supervised: Send {
-    /// Resolves with a description of how the process ended.
     fn wait(&mut self) -> impl Future<Output = String> + Send;
     fn stop(&mut self, grace: Duration) -> impl Future<Output = ()> + Send;
-    /// What the board shows while the process runs.
     fn running_status(&self) -> Status;
 }
 
-/// `running` is the process's `running_status`, so a check can find where to look without borrowing the process.
 pub trait Readiness: Send + Sync {
-    /// True once the process is ready, false when this gives up waiting.
     fn first(&self, running: &Status) -> impl Future<Output = bool> + Send;
-    /// One check, bounded by its own timeout.
     fn probe(&self, running: &Status) -> impl Future<Output = bool> + Send;
 }
 
@@ -51,9 +46,7 @@ impl Readiness for NoReadiness {
 }
 
 pub enum Command {
-    /// Starts again at once with the restart count back at zero.
     Restart,
-    /// Stops the process and keeps it down; `held` answers once nothing is running.
     Hold {
         note: String,
         held: oneshot::Sender<()>,
@@ -116,7 +109,6 @@ impl Loop {
         }
     }
 
-    /// Launches, waits for readiness and then watches the running process until something ends it.
     async fn run<L: Launcher, R: Readiness>(
         &mut self,
         launcher: &mut L,
@@ -132,12 +124,22 @@ impl Loop {
 
         if let Some(readiness) = readiness {
             let waiting = Instant::now();
-            let ready = tokio::select! {
-                ready = readiness.first(&running) => ready,
-                exit = process.wait() => return Event::Failed(exit),
-                () = stop_requested(&mut self.stop) => {
-                    process.stop(STOP_GRACE).await;
-                    return Event::Stop;
+            let mut first = pin!(readiness.first(&running));
+            let ready = loop {
+                tokio::select! {
+                    ready = &mut first => break ready,
+                    exit = process.wait() => return Event::Failed(exit),
+                    () = stop_requested(&mut self.stop) => {
+                        process.stop(STOP_GRACE).await;
+                        return Event::Stop;
+                    }
+                    command = Self::command(&mut self.commands) => match Event::from(command) {
+                        Event::Resume => {}
+                        event => {
+                            process.stop(STOP_GRACE).await;
+                            return event;
+                        }
+                    },
                 }
             };
             if !ready {
@@ -191,7 +193,6 @@ impl Loop {
         }
     }
 
-    /// Sits out a backoff (or, with `None`, waits for a command) and says what ended the wait.
     async fn wait_out(&mut self, after: Option<Duration>) -> Event {
         let mut timer = pin!(async {
             match after {
@@ -211,7 +212,6 @@ impl Loop {
         }
     }
 
-    /// Returns true when resumed, false when the app is stopping.
     async fn hold(&mut self, note: String, held: oneshot::Sender<()>) -> bool {
         let (mut note, mut held) = (note, held);
         loop {
@@ -675,6 +675,65 @@ mod tests {
             rig.crash().await;
             assert_eq!(rig.backoff(), Some(first), "{phase}");
         }
+    }
+
+    async fn waiting_for_first_readiness() -> Rig {
+        let script = Script::default();
+        let readiness = ready_after(&script, Duration::from_secs(1000), true);
+        start_with(script, Some(readiness)).await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_while_waiting_for_readiness_stops_the_process_and_launches_a_new_one() {
+        let rig = waiting_for_first_readiness().await;
+        assert_eq!(rig.status(), Status::Starting);
+
+        rig.send(Command::Restart).await;
+
+        assert_eq!(rig.script.stops(), 1);
+        assert_eq!(rig.script.launches(), 2);
+        assert_eq!(rig.status(), Status::Starting);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hold_while_waiting_for_readiness_stops_the_process_and_resume_ignores_a_stray_one() {
+        let rig = waiting_for_first_readiness().await;
+        rig.send(Command::Resume).await;
+        assert_eq!(rig.script.stops(), 0);
+        assert_eq!(rig.script.launches(), 1);
+        let (held, answered) = oneshot::channel();
+
+        rig.send(Command::Hold {
+            note: "backing up".into(),
+            held,
+        })
+        .await;
+
+        assert!(answered.await.is_ok());
+        assert_eq!(rig.script.stops(), 1);
+        assert_eq!(rig.status(), Status::Note("backing up".into()));
+        elapse(Duration::from_secs(1000)).await;
+        assert_eq!(rig.script.launches(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_after_giving_up_on_a_backend_that_never_became_healthy_tries_again() {
+        let script = Script::default();
+        let limit = Duration::from_secs(180);
+        let rig = start_with(script.clone(), Some(ready_after(&script, limit, false))).await;
+        loop {
+            elapse(limit).await;
+            match rig.backoff() {
+                Some(after) => elapse(after).await,
+                None => break,
+            }
+        }
+        let launches = script.launches();
+
+        rig.send(Command::Restart).await;
+
+        assert_eq!(script.launches(), launches + 1);
+        assert_eq!(rig.status(), Status::Starting);
     }
 
     #[tokio::test(start_paused = true)]

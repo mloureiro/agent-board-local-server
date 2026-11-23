@@ -103,7 +103,6 @@ export interface Runner {
   writeLine: (line: string) => void;
   /** Resolves with the first match in what the runner printed so far or prints next; fails after the timeout. */
   waitFor: (pattern: RegExp, timeoutMs: number) => Promise<RegExpMatchArray>;
-  /** Like waitFor, but matches only what the runner prints after this call. */
   waitForNew: (pattern: RegExp, timeoutMs: number) => Promise<RegExpMatchArray>;
   appRoot: string;
   proxyPort: number;

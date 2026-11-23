@@ -84,6 +84,11 @@ impl AppPaths {
             .join(crate::worker::credentials::HELPER_LINK)
     }
 
+    pub fn worker_credentials_pending(&self) -> PathBuf {
+        self.worker_dir()
+            .join(crate::worker::credentials::PENDING_HELPER_LINK)
+    }
+
     pub fn worker_config_dir(&self) -> PathBuf {
         self.worker_dir().join("config")
     }

@@ -8,6 +8,11 @@ use crate::supervisor::{Status, StatusBoard};
 pub const OPEN_BOARD: &str = "open-board";
 pub const CONNECT_WORKER: &str = "connect-worker";
 pub const CHECK_WORKER: &str = "check-worker";
+pub const RESTART_SERVER: &str = "restart-server";
+pub const RESTART_WORKER: &str = "restart-worker";
+pub const DISCONNECT_WORKER: &str = "disconnect-worker";
+pub const OPEN_LOGS: &str = "open-logs";
+pub const OPEN_SETTINGS: &str = "open-settings";
 pub const QUIT: &str = "quit";
 
 pub fn proxy_port(proxy: Option<&Status>) -> Option<u16> {
@@ -24,8 +29,16 @@ pub fn connect_label(listener: Option<&Status>) -> &'static str {
     }
 }
 
-pub fn check_enabled(listener: Option<&Status>) -> bool {
+pub fn worker_connected(listener: Option<&Status>) -> bool {
     matches!(listener, Some(status) if *status != Status::NotConnected)
+}
+
+pub fn action_enabled(busy: bool) -> bool {
+    !busy
+}
+
+pub fn worker_action_enabled(busy: bool, listener: Option<&Status>) -> bool {
+    action_enabled(busy) && worker_connected(listener)
 }
 
 pub fn version_line(build: Option<&CoreBuild>) -> String {
@@ -44,6 +57,11 @@ pub struct TrayMenu {
     open: MenuItem<Wry>,
     connect: MenuItem<Wry>,
     check: MenuItem<Wry>,
+    restart_server: MenuItem<Wry>,
+    restart_worker: MenuItem<Wry>,
+    disconnect: MenuItem<Wry>,
+    open_logs: MenuItem<Wry>,
+    open_settings: MenuItem<Wry>,
     rows: Vec<(&'static str, &'static str, MenuItem<Wry>)>,
 }
 
@@ -53,6 +71,15 @@ impl TrayMenu {
         let connect =
             MenuItem::with_id(app, CONNECT_WORKER, "Connect worker…", false, None::<&str>)?;
         let check = MenuItem::with_id(app, CHECK_WORKER, "Check worker", false, None::<&str>)?;
+        let item = |id: &str, label: &str| MenuItem::with_id(app, id, label, false, None::<&str>);
+        let restart_server = item(RESTART_SERVER, "Restart server")?;
+        let restart_worker = item(RESTART_WORKER, "Restart worker")?;
+        let disconnect = item(DISCONNECT_WORKER, "Disconnect worker")?;
+        let open_logs = item(OPEN_LOGS, "Open logs folder")?;
+        let open_settings = item(
+            OPEN_SETTINGS,
+            "Open settings file (applies after Quit and reopen)",
+        )?;
         let quit = MenuItem::with_id(app, QUIT, "Quit", true, None::<&str>)?;
         let rows: Vec<_> = ROWS
             .iter()
@@ -84,8 +111,13 @@ impl TrayMenu {
         entries.extend([
             &lower_divider as &dyn tauri::menu::IsMenuItem<Wry>,
             &version,
-            &connect,
+            &restart_server,
+            &restart_worker,
+            &disconnect,
             &check,
+            &open_logs,
+            &open_settings,
+            &connect,
             &quit,
         ]);
         let menu = Menu::with_items(app, &entries)?;
@@ -94,6 +126,11 @@ impl TrayMenu {
             open,
             connect,
             check,
+            restart_server,
+            restart_worker,
+            disconnect,
+            open_logs,
+            open_settings,
             rows,
         })
     }
@@ -102,7 +139,7 @@ impl TrayMenu {
         &self.menu
     }
 
-    pub fn refresh(&self, board: &StatusBoard) {
+    pub fn refresh(&self, board: &StatusBoard, busy: bool) {
         for (name, title, item) in &self.rows {
             if let Some(current) = board.get(name) {
                 set_text(item, current.label(title));
@@ -111,9 +148,13 @@ impl TrayMenu {
         let ready = proxy_port(board.get(PROXY).as_ref()).is_some();
         let _ = self.open.set_enabled(ready);
         let _ = self.connect.set_enabled(ready);
-        let _ = self
-            .check
-            .set_enabled(check_enabled(board.get(WORKER_LISTEN).as_ref()));
+        let listener = board.get(WORKER_LISTEN);
+        for item in [&self.restart_server, &self.open_logs, &self.open_settings] {
+            let _ = item.set_enabled(action_enabled(busy));
+        }
+        for item in [&self.restart_worker, &self.disconnect, &self.check] {
+            let _ = item.set_enabled(worker_action_enabled(busy, listener.as_ref()));
+        }
         set_text(
             &self.connect,
             connect_label(board.get(WORKER_LISTEN).as_ref()).to_owned(),
@@ -157,11 +198,20 @@ mod tests {
     }
 
     #[test]
-    fn the_worker_can_be_checked_once_it_is_anything_but_not_connected() {
-        assert!(!check_enabled(None));
-        assert!(!check_enabled(Some(&Status::NotConnected)));
-        assert!(check_enabled(Some(&Status::Starting)));
-        assert!(check_enabled(Some(&Status::Blocked { reason: "x".into() })));
+    fn a_worker_action_needs_a_connected_worker_and_a_free_gate() {
+        let blocked = Status::Blocked { reason: "x".into() };
+
+        assert!(!worker_action_enabled(false, None));
+        assert!(!worker_action_enabled(false, Some(&Status::NotConnected)));
+        assert!(worker_action_enabled(false, Some(&Status::Starting)));
+        assert!(worker_action_enabled(false, Some(&blocked)));
+        assert!(!worker_action_enabled(true, Some(&Status::Starting)));
+    }
+
+    #[test]
+    fn every_other_action_needs_only_a_free_gate() {
+        assert!(action_enabled(false));
+        assert!(!action_enabled(true));
     }
 
     #[test]

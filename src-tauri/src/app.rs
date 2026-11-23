@@ -4,6 +4,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, RunEvent};
 use tokio::sync::Mutex;
 
+use crate::activity::Activity;
 use crate::applog::LogFile;
 use crate::core_build::CoreBuild;
 use crate::enrol_window;
@@ -49,6 +50,9 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             app.manage(app_log.clone());
+            app.manage(paths.clone());
+            let activity = Arc::new(Activity::default());
+            app.manage(activity.clone());
             let keychain = Keychain::for_root(&root);
 
             let resources = Resources::new(app.path().resource_dir().unwrap_or_default());
@@ -83,15 +87,23 @@ pub fn run() {
                 .build(app)?;
 
             let mut changes = board.subscribe();
+            let mut busy = activity.subscribe();
             let reader = board.clone();
             tauri::async_runtime::spawn(async move {
                 let mut shown = None;
-                while changes.changed().await.is_ok() {
-                    tray_menu.refresh(&reader);
+                loop {
+                    tray_menu.refresh(&reader, busy.borrow_and_update().is_some());
                     let failing = first_failing(&reader);
                     if failing != shown {
                         show_health(&tray_icon, failing.as_deref());
                         shown = failing;
+                    }
+                    let alive = tokio::select! {
+                        changed = changes.changed() => changed.is_ok(),
+                        changed = busy.changed() => changed.is_ok(),
+                    };
+                    if !alive {
+                        break;
                     }
                 }
             });
@@ -141,7 +153,7 @@ pub fn run() {
                         }),
                     paths: paths.clone(),
                 };
-                match runtime::start(config, proxy_secrets, board.clone()).await {
+                match runtime::start(config, proxy_secrets, board.clone(), activity).await {
                     Ok(running) => {
                         apply_autostart(
                             &handle,
@@ -171,6 +183,9 @@ pub fn run() {
 /// The system can end the app without a Quit click (log out, restart, a terminate request); the processes it
 /// started must not outlive it, so whatever Quit has not already stopped is stopped here.
 fn stop_before_exit(app: &AppHandle) {
+    if let Some(activity) = app.try_state::<Arc<Activity>>() {
+        activity.quit();
+    }
     enrol_window::close(app);
     let Some(running) = app.try_state::<Running>() else {
         return;
@@ -184,6 +199,7 @@ fn stop_before_exit(app: &AppHandle) {
 
 /// The startup guard on the shared slot makes a quit that arrives mid-start wait until what started can be stopped.
 fn quit_app(app: &AppHandle) {
+    app.state::<Arc<Activity>>().quit();
     let running = app.state::<Running>().inner().clone();
     let app = app.clone();
     enrol_window::close(&app);

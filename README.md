@@ -75,7 +75,7 @@ AGENT_BOARD_CONFIG_DIR="$R/config" AGENT_BOARD_STATE_DIR="$R/state" AGENT_BOARD_
 ## Requirements
 
 - Node 24 and pnpm
-- Rust (stable) with `cargo` on `PATH`
+- Rust at the version pinned in `rust-toolchain.toml` (rustup installs it on first use), with `cargo` on `PATH`
 - `git` and [Bun](https://bun.sh), for `pnpm core:build`
 
 ## Commands
@@ -93,7 +93,7 @@ pnpm test:smoke     # black-box suite against the built sidecar; run pnpm core:b
 pnpm acceptance     # checks the built .app on a scratch app root; see below
 ```
 
-`dev` and `build` run `core:build` themselves. `test:smoke` and `acceptance` need it done first.
+The four gates (`format:check`, `lint`, `typecheck`, `test`) also run in CI on every push and pull request. `test:smoke` and `acceptance` stay local: they need the built core. `dev` and `build` run `core:build` themselves; `test:smoke` and `acceptance` need it done first.
 
 ## Acceptance
 

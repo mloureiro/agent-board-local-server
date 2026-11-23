@@ -47,6 +47,17 @@ pub async fn open_board(port: u16) -> Opened {
     .await
 }
 
+pub async fn open_text(file: &std::path::Path) {
+    let _ = tokio::process::Command::new(OPEN)
+        .arg("-t")
+        .arg(file)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;

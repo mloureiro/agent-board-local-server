@@ -75,6 +75,10 @@ impl AppPaths {
         self.worker_bin_dir().join("board")
     }
 
+    pub fn worker_board_local(&self) -> PathBuf {
+        self.worker_bin_dir().join("board-local")
+    }
+
     pub fn worker_credentials(&self) -> PathBuf {
         self.worker_dir()
             .join(crate::worker::credentials::HELPER_LINK)

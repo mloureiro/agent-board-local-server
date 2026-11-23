@@ -7,6 +7,7 @@ use crate::supervisor::{Status, StatusBoard};
 
 pub const OPEN_BOARD: &str = "open-board";
 pub const CONNECT_WORKER: &str = "connect-worker";
+pub const CHECK_WORKER: &str = "check-worker";
 pub const QUIT: &str = "quit";
 
 pub fn proxy_port(proxy: Option<&Status>) -> Option<u16> {
@@ -21,6 +22,10 @@ pub fn connect_label(listener: Option<&Status>) -> &'static str {
         None | Some(Status::NotConnected) => "Connect worker…",
         Some(_) => "Reconnect worker…",
     }
+}
+
+pub fn check_enabled(listener: Option<&Status>) -> bool {
+    matches!(listener, Some(status) if *status != Status::NotConnected)
 }
 
 pub fn version_line(build: Option<&CoreBuild>) -> String {
@@ -38,6 +43,7 @@ pub struct TrayMenu {
     menu: Menu<Wry>,
     open: MenuItem<Wry>,
     connect: MenuItem<Wry>,
+    check: MenuItem<Wry>,
     rows: Vec<(&'static str, &'static str, MenuItem<Wry>)>,
 }
 
@@ -46,6 +52,7 @@ impl TrayMenu {
         let open = MenuItem::with_id(app, OPEN_BOARD, "Open board", false, None::<&str>)?;
         let connect =
             MenuItem::with_id(app, CONNECT_WORKER, "Connect worker…", false, None::<&str>)?;
+        let check = MenuItem::with_id(app, CHECK_WORKER, "Check worker", false, None::<&str>)?;
         let quit = MenuItem::with_id(app, QUIT, "Quit", true, None::<&str>)?;
         let rows: Vec<_> = ROWS
             .iter()
@@ -78,6 +85,7 @@ impl TrayMenu {
             &lower_divider as &dyn tauri::menu::IsMenuItem<Wry>,
             &version,
             &connect,
+            &check,
             &quit,
         ]);
         let menu = Menu::with_items(app, &entries)?;
@@ -85,6 +93,7 @@ impl TrayMenu {
             menu,
             open,
             connect,
+            check,
             rows,
         })
     }
@@ -102,6 +111,9 @@ impl TrayMenu {
         let ready = proxy_port(board.get(PROXY).as_ref()).is_some();
         let _ = self.open.set_enabled(ready);
         let _ = self.connect.set_enabled(ready);
+        let _ = self
+            .check
+            .set_enabled(check_enabled(board.get(WORKER_LISTEN).as_ref()));
         set_text(
             &self.connect,
             connect_label(board.get(WORKER_LISTEN).as_ref()).to_owned(),
@@ -142,6 +154,14 @@ mod tests {
         assert_eq!(proxy_port(Some(&Status::Starting)), None);
         assert_eq!(proxy_port(Some(&Status::Stopped)), None);
         assert_eq!(proxy_port(None), None);
+    }
+
+    #[test]
+    fn the_worker_can_be_checked_once_it_is_anything_but_not_connected() {
+        assert!(!check_enabled(None));
+        assert!(!check_enabled(Some(&Status::NotConnected)));
+        assert!(check_enabled(Some(&Status::Starting)));
+        assert!(check_enabled(Some(&Status::Blocked { reason: "x".into() })));
     }
 
     #[test]

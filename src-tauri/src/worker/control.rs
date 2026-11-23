@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 
+use super::check;
 use super::credentials::{discard_pending, enrolled, pending_present};
 use super::enrol::{enrol, BoardInit, EnrolError, InitReport, InitRunner};
 use super::layout;
@@ -102,6 +103,15 @@ impl WorkerControl {
         layout::ensure(&self.host.setup.paths, bundled_board, app_executable)
             .map_err(|error| error.to_string())?;
         discard_pending(self.secrets.as_ref()).map_err(|error| error.to_string())
+    }
+
+    pub fn check_log(&self) -> std::path::PathBuf {
+        self.host.setup.paths.log_file("worker-check")
+    }
+
+    pub async fn check(&self) -> usize {
+        let setup = &self.host.setup;
+        check::run(&setup.board, &setup.env, &self.check_log()).await
     }
 }
 

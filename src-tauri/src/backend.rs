@@ -128,6 +128,7 @@ mod tests {
             data_dir: PathBuf::from("/Users/ines/Library/Application Support/app/data"),
             port: 4785,
             start_at_login: true,
+            worker_path: Vec::new(),
         };
         let resources = Resources::new("/App/Contents/Resources");
         let url = "/Users/ines/Library/Application%20Support/app/data/pglite";

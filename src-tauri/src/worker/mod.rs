@@ -1,3 +1,5 @@
+pub mod board_local;
+pub mod check;
 pub mod control;
 pub mod credentials;
 pub mod enrol;

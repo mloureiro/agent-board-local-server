@@ -28,8 +28,12 @@ describe('worker enrolment against the built board', () => {
     return ((await response.json()) as { result: { data: unknown } }).result.data;
   };
 
-  const issue = async (name: string): Promise<string> =>
-    ((await trpc('machines.issue', { name })) as { token: string }).token;
+  const issuedTokens: string[] = [];
+  const issue = async (name: string): Promise<string> => {
+    const token = ((await trpc('machines.issue', { name })) as { token: string }).token;
+    issuedTokens.push(token);
+    return token;
+  };
 
   const machineInConfig = (): unknown =>
     (JSON.parse(readFileSync(join(runner.appRoot, 'worker/config/config.json'), 'utf8')) as { machine: unknown })
@@ -111,4 +115,23 @@ describe('worker enrolment against the built board', () => {
 
     expect(line[1]).toBe('refused');
   }, 260_000);
+
+  it('writes no token, data key, proxy secret, sign-in value or query string to the app logs', async () => {
+    const queryMarker = 'query-marker-9f3a';
+    await fetch(`${base}/trpc/me?${queryMarker}=1`);
+    const logs = ['app.log', 'proxy.log']
+      .map((name) => readFileSync(join(runner.appRoot, 'logs', name), 'utf8'))
+      .join('\n');
+    const dataKey = dataKeyLine.split('=')[1] as string;
+
+    expect(logs).toContain('/trpc/me');
+    expect(issuedTokens.length).toBeGreaterThan(0);
+    for (const token of issuedTokens) expect(logs).not.toContain(token);
+    expect(logs).not.toContain('never-issued');
+    expect(logs).not.toContain(dataKey);
+    expect(logs).not.toContain(queryMarker);
+    expect(logs).not.toContain('?');
+    expect(logs).not.toMatch(/[0-9a-f]{64}/);
+    expect(logs).not.toMatch(/proxy-secret|Board-Proxy-Secret|Remote-User|Remote-Groups|authorization/i);
+  });
 });

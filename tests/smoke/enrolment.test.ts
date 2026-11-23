@@ -78,7 +78,7 @@ describe('worker enrolment against the built board', () => {
     runner.writeLine(dataKeyLine);
     await runner.waitFor(/worker enrolled as tnk_one/, 120_000);
     expect(machineInConfig()).toBe('tnk_one');
-    await runner.waitFor(/worker: ok/, 120_000);
+    await runner.waitFor(/Worker: ok/, 120_000);
 
     runner.writeLine(`AGENT_BOARD_TOKEN=${await issue('tnk_two')}`);
     runner.writeLine(dataKeyLine);
@@ -107,7 +107,7 @@ describe('worker enrolment against the built board', () => {
     // A token issued again for the same name replaces the one the worker holds.
     await issue('tnk_two');
 
-    const line = await runner.waitFor(/worker: (refused|error) — (.*)/, 200_000);
+    const line = await runner.waitFor(/Worker: (refused|error) — (.*)/, 200_000);
 
     expect(line[1]).toBe('refused');
   }, 260_000);

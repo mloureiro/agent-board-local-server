@@ -18,7 +18,7 @@ describe('a backend that is killed', () => {
     const [backend] = findByName(runner.tree(), 'board-server');
     expect(backend).toBeDefined();
 
-    const running = runner.waitForNew(/backend running on 127\.0\.0\.1:\d+/, 180_000);
+    const running = runner.waitForNew(/Backend running on 127\.0\.0\.1:\d+/, 180_000);
     process.kill(backend as number, 'SIGKILL');
     await running;
 

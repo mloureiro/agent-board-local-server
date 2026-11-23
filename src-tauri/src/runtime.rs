@@ -13,16 +13,15 @@ use crate::secrets::{proxy_secret, SecretError, SecretStore};
 use crate::settings::{Settings, SettingsError};
 use crate::supervisor::orphans;
 use crate::supervisor::process::stop_requested;
+use crate::supervisor::table::{BACKEND, PROXY, WORKER_LISTEN};
 use crate::supervisor::{
     supervise, Control, Launcher, ProcessSpec, RunningProcess, Spawned, Status, StatusBoard,
 };
 use crate::worker::control::Enrolled;
 use crate::worker::enrol::EnrolError;
-use crate::worker::processes::{WorkerSetup, WORKER_LISTEN};
+use crate::worker::processes::WorkerSetup;
 use crate::worker::{env as worker_env, WorkerControl};
 
-pub const BACKEND: &str = "backend";
-pub const PROXY: &str = "proxy";
 const ORPHAN_GRACE: Duration = Duration::from_secs(5);
 
 pub struct Config {
@@ -70,9 +69,14 @@ pub struct Handle {
     proxy_task: JoinHandle<()>,
     backend_task: JoinHandle<()>,
     worker: Option<Arc<WorkerControl>>,
+    settings: Settings,
 }
 
 impl Handle {
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
     pub fn worker(&self) -> Option<Arc<WorkerControl>> {
         self.worker.clone()
     }
@@ -153,7 +157,7 @@ pub async fn start(
             BACKEND,
             BackendLauncher {
                 config,
-                settings,
+                settings: settings.clone(),
                 secret,
                 port: None,
             },
@@ -172,6 +176,7 @@ pub async fn start(
         proxy_task,
         backend_task,
         worker,
+        settings,
     })
 }
 

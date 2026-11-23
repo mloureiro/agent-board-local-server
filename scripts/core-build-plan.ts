@@ -12,6 +12,7 @@ export interface CoreBuild {
   commit: string;
   bun: string;
   recipe: string;
+  builtAt: string;
   files: Record<string, string>;
 }
 
@@ -57,12 +58,18 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 export function parseCoreBuild(value: unknown): CoreBuild | null {
   if (!isRecord(value)) return null;
-  const { commit, bun, recipe, files } = value;
-  if (typeof commit !== 'string' || typeof bun !== 'string' || typeof recipe !== 'string' || !isRecord(files))
+  const { commit, bun, recipe, builtAt, files } = value;
+  if (
+    typeof commit !== 'string' ||
+    typeof bun !== 'string' ||
+    typeof recipe !== 'string' ||
+    typeof builtAt !== 'string' ||
+    !isRecord(files)
+  )
     return null;
   const entries = Object.entries(files);
   if (!entries.every((entry): entry is [string, string] => typeof entry[1] === 'string')) return null;
-  return { commit, bun, recipe, files: Object.fromEntries(entries) };
+  return { commit, bun, recipe, builtAt, files: Object.fromEntries(entries) };
 }
 
 export function isBuildCurrent(

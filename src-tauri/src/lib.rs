@@ -1,5 +1,6 @@
 mod app;
 pub mod backend;
+pub mod core_build;
 pub mod enrol_window;
 pub mod lock;
 pub mod paths;

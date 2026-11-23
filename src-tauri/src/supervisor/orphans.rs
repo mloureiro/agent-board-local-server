@@ -85,7 +85,6 @@ mod tests {
     fn record(dir: &Path, name: &str, child: &Child, argv0: &str) {
         Pidfile {
             pid: child.id(),
-            started_at: 0,
             argv0: argv0.into(),
         }
         .write(&dir.join(format!("{name}.pid")))

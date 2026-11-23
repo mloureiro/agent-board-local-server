@@ -139,7 +139,7 @@ describe('the built backend behind the proxy', () => {
     for (const dir of ['bin', 'config', 'state', 'run']) expect(statSync(join(worker, dir)).isDirectory()).toBe(true);
     expect(readlinkSync(join(worker, 'bin/board'))).toMatch(/board-aarch64-apple-darwin$/);
     expect(runner.output()).toContain('Worker not connected');
-    expect(runner.output()).not.toMatch(/worker (listener|watch)/);
+    expect(runner.output()).not.toMatch(/Worker (listener|watch)/);
   });
 
   it('listens on loopback only', () => {

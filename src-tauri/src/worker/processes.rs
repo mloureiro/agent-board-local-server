@@ -11,14 +11,10 @@ use tokio::time::sleep;
 use super::report::worker_note;
 use crate::paths::AppPaths;
 use crate::supervisor::process::stop_requested;
+use crate::supervisor::table::{DISPATCH, WORKER, WORKER_LISTEN, WORKER_WATCH};
 use crate::supervisor::{
     supervise, Launcher, NoReadiness, ProcessSpec, RunningProcess, Spawned, Status, StatusBoard,
 };
-
-pub const WORKER_LISTEN: &str = "worker-listen";
-pub const WORKER_WATCH: &str = "worker-watch";
-pub const DISPATCH: &str = "dispatch";
-pub const WORKER: &str = "worker";
 
 const TICK_EVERY: Duration = Duration::from_secs(120);
 const TICK_LIMIT: Duration = Duration::from_secs(110);
@@ -250,8 +246,8 @@ async fn dispatch_timer(
             Ok(Tick::Stopped) => return,
             Ok(Tick::Done(result)) => {
                 board.set(DISPATCH, Status::Note(result.label(&clock())));
-                if let Some(note) = worker_note(&result, &setup.paths.log_file(DISPATCH)) {
-                    board.set(WORKER, Status::Note(note));
+                if let Some(status) = worker_note(&result, &setup.paths.log_file(DISPATCH)) {
+                    board.set(WORKER, status);
                 }
             }
             Err(reason) => board.set(DISPATCH, Status::Note(format!("{reason} at {}", clock()))),

@@ -5,7 +5,7 @@ use tauri::AppHandle;
 use super::menu::{proxy_port, CONNECT_WORKER, OPEN_BOARD};
 use super::open_board::open_board;
 use crate::enrol_window;
-use crate::runtime::PROXY;
+use crate::supervisor::table::PROXY;
 use crate::supervisor::StatusBoard;
 
 pub fn handle_click(app: &AppHandle, id: &str, board: &Arc<StatusBoard>) {

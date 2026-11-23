@@ -32,7 +32,18 @@ Settings keys, all optional: `userName` (default the macOS login name, the board
 
 **Plain and outside the data folder.** The worker's run logs under `worker/state/` and Claude Code's own session transcripts under `~/.claude/` hold the text of runs in plain form, as they do for any core worker; they are not covered by the data folder's protection. The folder holds nothing a stolen copy of it could read as content, but the Mac's disk encryption is what protects those two.
 
-**Keychain prompt after a rebuild.** The `.app` is ad-hoc signed, so every rebuild has a new code identity and macOS can ask again for permission to read the existing Keychain items. Choose "Always Allow", or the worker stays disconnected until you do.
+**Keychain prompt after a rebuild.** An ad-hoc signed `.app` (the default) has a new code identity on every build, so macOS can ask again for permission to read the existing Keychain items; choose "Always Allow", or the worker stays disconnected until you do. A build signed with a fixed identity keeps its code identity across rebuilds: the first signed build prompts once, and a rebuild installed over it reads the same items without a prompt. See "Signing a build".
+
+## Signing a build
+
+Builds are local. `pnpm build` signs the `.app` and both bundled sidecars (`board-server`, `board`) with the identity named in `APPLE_SIGNING_IDENTITY`, and ad-hoc when the variable is not set, so a checkout without an identity builds as before. Create the identity once, in the login Keychain of the Mac that builds:
+
+1. Open Keychain Access, then Keychain Access > Certificate Assistant > Create a Certificate.
+2. Name it (for example `Agent Board Local Signing`), set Identity Type to Self Signed Root and Certificate Type to Code Signing, tick "Let me override defaults", and continue to the validity step.
+3. Set the validity to a long period (3650 days), accept the other defaults, and keep the login keychain as the location.
+4. Build with the certificate's name: `APPLE_SIGNING_IDENTITY="Agent Board Local Signing" pnpm build`.
+
+The first signed build prompts once for each Keychain item; choose "Always Allow". A later build signed with the same identity, installed over the previous one, reads the items without a prompt. Replacing the identity (an expired certificate, a new name) is a new code identity and prompts once again. `pnpm acceptance` reports the signer of the app and of both sidecars and fails when they differ.
 
 ## The tray
 
@@ -95,7 +106,7 @@ The headless runner reads the same pair from stdin, so that neither value appear
 cargo run --example headless -- --app-root <dir> --port <port> --enrol-from-stdin
 ```
 
-`--worker` starts an already enrolled worker from that runner's own Keychain items (one Keychain service per app root, so a scratch root never touches the app's items).
+`--worker` starts an already enrolled worker from that runner's own Keychain items (the app's own scheme: one Keychain service per app root, so a scratch root never touches the app's items; the runner's proxy secret stays in memory).
 
 On Quit the dispatch tick, the listener and the watch unit get SIGTERM, then the running cards are asked to pause through `board internal shutdown --grace 20`, which leaves them resumable on this machine, then any worker still left is killed, and only then do the proxy and the backend stop. The whole sequence takes about a minute at most.
 
@@ -124,7 +135,7 @@ Quit the app first, then run the executable inside the `.app` (the path below is
 
 `--uninstall` removes the login item (this build's file and the one an earlier build wrote) and the app's Keychain items for the configured root: the proxy secret, the machine token and the data key, including a pair being checked. The app folder, the data and the backups stay. `--delete-data` also removes the app folder, but only when it holds this app's `settings.json` (a regular file, not a symlink); otherwise it prints that the folder does not look like this app's and leaves it. It also leaves a root that is a symlink, has a `..` component, is the home folder or any folder above it, however the path is spelled, and takes no lock in a root it refuses. A `dataDir` or `backupDir` outside the app folder is printed and left for you to remove. With the app running it prints "quit the app first" and changes nothing. Any other argument prints a usage line and exits 2.
 
-With `AGENT_BOARD_LOCAL_SERVER_ROOT` set it acts on that root and its own Keychain service, and leaves the login item alone. An ad-hoc signed build can raise the Keychain prompt once per item; allow each. The `.app` itself is removed by hand.
+With `AGENT_BOARD_LOCAL_SERVER_ROOT` set it acts on that root and its own Keychain service, and leaves the login item alone. An ad-hoc signed build can raise the Keychain prompt once per item; allow each. The headless runner accepts `--uninstall [--delete-data] --app-root <dir>` for a scratch root and refuses the default root. The `.app` itself is removed by hand.
 
 ## Requirements
 
@@ -142,7 +153,7 @@ pnpm typecheck
 pnpm test
 pnpm core:build     # build the pinned core and stage it for the app
 pnpm dev            # run the app from source (builds the core first)
-pnpm build          # build the ad-hoc signed .app into src-tauri/target/release/bundle/macos
+pnpm build          # build the .app (signed with APPLE_SIGNING_IDENTITY, else ad-hoc) into src-tauri/target/release/bundle/macos
 pnpm test:smoke     # black-box suite against the built sidecar; run pnpm core:build first
 pnpm acceptance     # checks the built .app on a scratch app root; see below
 ```
@@ -151,7 +162,7 @@ The four gates (`format:check`, `lint`, `typecheck`, `test`) also run in CI on e
 
 ## Acceptance
 
-`pnpm acceptance [--app <path>] [--root <dir>|default] [--port <n>] [--skip-marker] [--keep]` starts the built `.app` on a scratch app root (a new folder and port, `startAtLogin` off, its own Keychain service) and prints one PASS, FAIL or INFO line per check: bundle layout and part sizes, the ad-hoc signature, `/healthz`, AC13 (the board page on `localhost`), AC4 (every listener of the app's process tree is loopback), AC8 (the worker folders exist and are not the core's defaults) and idle memory (resident size and physical footprint of the app and `board-server`). Unless `--skip-marker` is given it then prints a random marker, waits for a card carrying it in title and prompt (set up encryption and create it in the browser), quits the app, and checks AC6 (no process from the bundle or the worker folders remains) and AC11 (a copy of the data folder holds the marker in no byte, as UTF-8, UTF-16LE or UTF-16BE). It exits 1 when a check fails and removes the scratch root and its Keychain items unless `--keep` is given.
+`pnpm acceptance [--app <path>] [--root <dir>|default] [--port <n>] [--skip-marker] [--keep]` starts the built `.app` on a scratch app root (a new folder and port, `startAtLogin` off, its own Keychain service) and prints one PASS, FAIL or INFO line per check: bundle layout and part sizes, the signature (the app and both sidecars must carry the same signer, ad-hoc or the named identity), `/healthz`, AC13 (the board page on `localhost`), AC4 (every listener of the app's process tree is loopback), AC8 (the worker folders exist and are not the core's defaults) and idle memory (resident size and physical footprint of the app and `board-server`). Unless `--skip-marker` is given it then prints a random marker, waits for a card carrying it in title and prompt (set up encryption and create it in the browser), quits the app, and checks AC6 (no process from the bundle or the worker folders remains) and AC11 (a copy of the data folder holds the marker in no byte, as UTF-8, UTF-16LE or UTF-16BE). It exits 1 when a check fails and removes the scratch root and its Keychain items through the app's own `--uninstall --delete-data` unless `--keep` is given.
 
 `pnpm acceptance:binary` compiles the same script into `dist/acceptance` with Bun, for a Mac that has neither Node nor Bun.
 

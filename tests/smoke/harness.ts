@@ -1,8 +1,9 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
+import { APP_IDENTIFIER } from '../../scripts/app-constants.ts';
+import { descendantsOf, freePort, parseProcessRows } from '../../scripts/acceptance-checks.ts';
 
 export const repoRoot = resolve(import.meta.dirname, '../..');
 const tauriDir = join(repoRoot, 'src-tauri');
@@ -50,15 +51,6 @@ export function requireStagedCore(): string {
   return commit;
 }
 
-export async function freePort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
-  const address = server.address();
-  await new Promise((done) => server.close(done));
-  if (address === null || typeof address === 'string') throw new Error('no port');
-  return address.port;
-}
-
 let built = false;
 
 function buildRunner(): void {
@@ -74,22 +66,9 @@ function buildRunner(): void {
   built = true;
 }
 
-function processTable(): Map<number, number[]> {
-  const listing = spawnSync('ps', ['-axo', 'pid=,ppid='], { encoding: 'utf8' }).stdout;
-  const children = new Map<number, number[]>();
-  for (const line of listing.split('\n')) {
-    const [pid, ppid] = line.trim().split(/\s+/).map(Number);
-    if (pid === undefined || ppid === undefined || Number.isNaN(pid) || Number.isNaN(ppid)) continue;
-    children.set(ppid, [...(children.get(ppid) ?? []), pid]);
-  }
-  return children;
-}
-
 export function processTree(root: number): number[] {
-  const children = processTable();
-  const found = [root];
-  for (let index = 0; index < found.length; index += 1) found.push(...(children.get(found[index] as number) ?? []));
-  return found;
+  const listing = spawnSync('ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' }).stdout;
+  return descendantsOf(parseProcessRows(listing), root);
 }
 
 export function findByName(pids: number[], name: string): number[] {
@@ -158,6 +137,16 @@ export async function tearDown(...steps: Array<() => unknown>): Promise<void> {
   }
   if (failures.length === 1) throw failures[0];
   if (failures.length > 1) throw new AggregateError(failures, 'Several teardown steps failed');
+}
+
+export const rootKeychainService = (appRoot: string): string => `${APP_IDENTIFIER}.root:${appRoot}`;
+
+export function uninstallScratch(appRoot: string): void {
+  if (!scratchRoots.has(appRoot)) throw new Error(`${appRoot} is not a scratch root of this run`);
+  const result = spawnSync(runnerBinary, ['--uninstall', '--delete-data', '--app-root', appRoot], {
+    encoding: 'utf8',
+  });
+  if (result.status !== 0) throw new Error(`Uninstalling ${appRoot} failed:\n${result.stdout}${result.stderr}`);
 }
 
 export function scratchDir(prefix: string): string {

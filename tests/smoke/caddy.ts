@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { freePort, pinnedCommit, repoRoot, scratchDir, pinnedCaddyfile, stagedFrontend } from './harness.ts';
+import { freePort } from '../../scripts/acceptance-checks.ts';
+import { pinnedCommit, repoRoot, scratchDir, pinnedCaddyfile, stagedFrontend } from './harness.ts';
 
 export function dockerAvailable(): boolean {
   return spawnSync('docker', ['info'], { stdio: 'ignore' }).status === 0;

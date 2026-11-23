@@ -12,23 +12,24 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
   containsMarker,
   descendantsOf,
+  freePort,
   isInside,
   isLoopbackAddress,
   listenAddresses,
   parseProcessRows,
-  ROOT_SECRET_ACCOUNTS,
   runsAppExecutable,
+  sameSigner,
+  signerOf,
   survivors,
   type ProcessRow,
 } from './acceptance-checks.ts';
+import { APP_IDENTIFIER, DEFAULT_PORT } from './app-constants.ts';
 
-const APP_IDENTIFIER = 'dev.mloureiro.agent-board-local-server';
 const EXECUTABLE = 'agent-board-local-server';
 const START_TIMEOUT_MS = 180_000;
 const QUIT_TIMEOUT_MS = 60_000;
@@ -82,15 +83,6 @@ const run = (command: string, args: string[]): string =>
 
 const processes = (): ProcessRow[] => parseProcessRows(run('ps', ['-axo', 'pid=,ppid=,command=']));
 
-async function freePort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
-  const address = server.address();
-  await new Promise((done) => server.close(done));
-  if (address === null || typeof address === 'string') throw new Error('No free port');
-  return address.port;
-}
-
 async function until<T>(what: string, ms: number, probe: () => Promise<T | null>): Promise<T> {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -119,7 +111,18 @@ function checkBundle(app: string): void {
   const sizes = parts.map(([name, path]) => `${name} ${existsSync(path) ? mb(sizeKb(path)) : 'missing'}`).join(', ');
   report('bundle', missing.length === 0, `${mb(sizeKb(app))} in total: ${sizes}`);
   const signature = spawnSync('codesign', ['--verify', '--deep', '--strict', app], { encoding: 'utf8' });
-  report('signature', signature.status === 0, signature.status === 0 ? 'ad-hoc signature verifies' : signature.stderr);
+  const signers = [
+    ['app', app],
+    ['board-server', join(macos, 'board-server')],
+    ['board', join(macos, 'board')],
+  ] as const;
+  const found = signers.map(([, path]) => signerOf(spawnSync('codesign', ['-dvv', path], { encoding: 'utf8' }).stderr));
+  const named = signers.map(([name], index) => `${name} ${found[index] ?? 'unsigned'}`).join(', ');
+  report(
+    'signature',
+    signature.status === 0 && sameSigner(found),
+    signature.status === 0 ? `verifies; signers: ${named}` : signature.stderr,
+  );
 }
 
 function walk(dir: string): string[] {
@@ -168,7 +171,7 @@ async function main(): Promise<void> {
     const settings = existsSync(settingsFile)
       ? (JSON.parse(readFileSync(settingsFile, 'utf8')) as { port?: number; dataDir?: string })
       : {};
-    port = settings.port ?? 4785;
+    port = settings.port ?? DEFAULT_PORT;
     dataDir = settings.dataDir ?? join(root, 'data');
   } else {
     mkdirSync(root, { recursive: true });
@@ -289,10 +292,11 @@ async function main(): Promise<void> {
       }
     }
     if (scratch && !options.keep) {
-      rmSync(root, { recursive: true, force: true });
-      const service = `${APP_IDENTIFIER}.root:${root}`;
-      for (const account of ROOT_SECRET_ACCOUNTS)
-        spawnSync('security', ['delete-generic-password', '-s', service, '-a', account], { stdio: 'ignore' });
+      const removal = spawnSync(join(app, 'Contents/MacOS', EXECUTABLE), ['--uninstall', '--delete-data'], {
+        encoding: 'utf8',
+        env,
+      });
+      report('cleanup', removal.status === 0, removal.stdout.trim().split('\n').join('; ') || removal.stderr.trim());
     }
   }
 }

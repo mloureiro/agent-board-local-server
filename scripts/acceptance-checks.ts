@@ -1,3 +1,14 @@
+import { createServer } from 'node:net';
+
+export async function freePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  const address = server.address();
+  await new Promise((done) => server.close(done));
+  if (address === null || typeof address === 'string') throw new Error('No free port');
+  return address.port;
+}
+
 export interface ProcessRow {
   pid: number;
   ppid: number;
@@ -64,10 +75,12 @@ export function runsAppExecutable(command: string, executable: string): boolean 
   });
 }
 
-export const ROOT_SECRET_ACCOUNTS = [
-  'proxy-secret',
-  'worker-token',
-  'worker-data-key',
-  'worker-token-pending',
-  'worker-data-key-pending',
-] as const;
+export function signerOf(codesignOutput: string): string | null {
+  if (/^Signature=adhoc$/m.test(codesignOutput)) return 'adhoc';
+  return /^Authority=(.+)$/m.exec(codesignOutput)?.[1]?.trim() ?? null;
+}
+
+export function sameSigner(signers: Array<string | null>): boolean {
+  const [first] = signers;
+  return first !== null && first !== undefined && signers.every((signer) => signer === first);
+}

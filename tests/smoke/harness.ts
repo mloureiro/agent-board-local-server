@@ -2,7 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
-import { APP_IDENTIFIER } from '../../scripts/app-constants.ts';
+import { APP_IDENTIFIER, ROOT_SERVICE_SEPARATOR } from '../../scripts/app-constants.ts';
 import { descendantsOf, freePort, parseProcessRows } from '../../scripts/acceptance-checks.ts';
 
 export const repoRoot = resolve(import.meta.dirname, '../..');
@@ -139,7 +139,7 @@ export async function tearDown(...steps: Array<() => unknown>): Promise<void> {
   if (failures.length > 1) throw new AggregateError(failures, 'Several teardown steps failed');
 }
 
-export const rootKeychainService = (appRoot: string): string => `${APP_IDENTIFIER}.root:${appRoot}`;
+export const rootKeychainService = (appRoot: string): string => `${APP_IDENTIFIER}${ROOT_SERVICE_SEPARATOR}${appRoot}`;
 
 export function uninstallScratch(appRoot: string): void {
   if (!scratchRoots.has(appRoot)) throw new Error(`${appRoot} is not a scratch root of this run`);

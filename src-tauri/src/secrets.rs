@@ -34,6 +34,8 @@ pub trait SecretStore: Send + Sync {
     fn delete(&self, account: &str) -> Result<(), SecretError>;
 }
 
+pub const ROOT_SERVICE_SEPARATOR: &str = ".root:";
+
 pub struct Keychain {
     service: String,
 }
@@ -49,8 +51,15 @@ impl Keychain {
         if AppPaths::default_root().as_deref() == Some(root) {
             Self::app()
         } else {
-            Self::with_service(format!("{APP_IDENTIFIER}.root:{}", root.display()))
+            Self::with_service(format!(
+                "{APP_IDENTIFIER}{ROOT_SERVICE_SEPARATOR}{}",
+                root.display()
+            ))
         }
+    }
+
+    pub fn service(&self) -> &str {
+        &self.service
     }
 
     pub fn with_service(service: impl Into<String>) -> Self {

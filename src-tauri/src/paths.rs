@@ -1,6 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
 pub const APP_IDENTIFIER: &str = "dev.mloureiro.agent-board-local-server";
+pub const APP_LOG: &str = "app";
 pub const ROOT_ENV: &str = "AGENT_BOARD_LOCAL_SERVER_ROOT";
 
 #[derive(Debug, Clone)]

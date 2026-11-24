@@ -8,7 +8,7 @@ use crate::lock::{self, LockError};
 use crate::login_item;
 use crate::paths::{has_parent_component, identity, is_within, resolve, AppPaths, APP_IDENTIFIER};
 use crate::secrets::{Keychain, SecretStore, ACCOUNTS};
-use crate::settings::Settings;
+use crate::settings::{login_name, Settings};
 
 pub const USAGE: &str = "usage: --uninstall [--delete-data]";
 pub const QUIT_FIRST: &str = "quit the app first";
@@ -211,7 +211,7 @@ fn remove_folder(folder: &Path) -> io::Result<bool> {
 }
 
 pub fn read_settings(paths: &AppPaths) -> Option<Settings> {
-    let defaults = Settings::defaults(paths, "user");
+    let defaults = Settings::defaults(paths, &login_name());
     match fs::read_to_string(paths.settings_file()) {
         Ok(text) => Settings::parse(&text, &defaults).ok(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Some(defaults),

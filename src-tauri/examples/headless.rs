@@ -6,10 +6,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_board_local_server::activity::Activity;
+use agent_board_local_server::applog::LogFile;
 use agent_board_local_server::lock::{self, LockError};
-use agent_board_local_server::paths::{AppPaths, Resources, Sidecars};
+use agent_board_local_server::paths::{AppPaths, Resources, Sidecars, APP_LOG};
 use agent_board_local_server::runtime::{self, Config, WorkerConfig};
 use agent_board_local_server::secrets::{Keychain, MemoryStore, SecretStore};
+use agent_board_local_server::settings::login_name;
 use agent_board_local_server::supervisor::table::PROXY;
 use agent_board_local_server::supervisor::{changed_labels, Status, StatusBoard};
 use agent_board_local_server::uninstall;
@@ -163,7 +165,8 @@ async fn main() {
     let config = Config {
         sidecars: Sidecars::beside(&args.core_dir.join("binaries")),
         resources: Resources::new(&args.core_dir),
-        login_name: std::env::var("USER").unwrap_or_else(|_| "user".into()),
+        login_name: login_name(),
+        app_log: LogFile::new(paths.log_file(APP_LOG)),
         port_override: args.port,
         upstream_override: args.upstream,
         worker,

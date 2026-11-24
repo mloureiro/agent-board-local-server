@@ -10,15 +10,14 @@ use crate::core_build::CoreBuild;
 use crate::enrol_window;
 use crate::lock::{self, LockError};
 use crate::login_item;
-use crate::paths::{AppPaths, Resources, Sidecars};
+use crate::paths::{AppPaths, Resources, Sidecars, APP_LOG};
 use crate::runtime::{self, Config, Running, WorkerConfig};
 use crate::secrets::Keychain;
+use crate::settings::login_name;
 use crate::supervisor::StatusBoard;
-use crate::tray::{first_failing, handle_click, show_health, HealthMark, TrayMenu, QUIT};
-
-fn login_name() -> String {
-    std::env::var("USER").unwrap_or_else(|_| "user".into())
-}
+use crate::tray::{
+    first_failing, handle_click, show_health, HealthMark, TrayMenu, IDLE_TOOLTIP, QUIT,
+};
 
 pub fn run() {
     let Some(root) = AppPaths::configured_root() else {
@@ -35,7 +34,7 @@ pub fn run() {
         }
     };
 
-    let app_log = LogFile::new(paths.log_file("app"));
+    let app_log = LogFile::new(paths.log_file(APP_LOG));
 
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -72,7 +71,7 @@ pub fn run() {
             let tray_icon = TrayIconBuilder::new()
                 .icon(tauri::include_image!("icons/tray.png"))
                 .icon_as_template(true)
-                .tooltip("agent-board local server")
+                .tooltip(IDLE_TOOLTIP)
                 .menu(tray_menu.menu())
                 .on_menu_event(move |app, event| {
                     if event.id().as_ref() == QUIT {
@@ -138,6 +137,7 @@ pub fn run() {
                     sidecars: Sidecars::beside(&exe_dir),
                     resources,
                     login_name: login_name(),
+                    app_log: app_log.clone(),
                     port_override: None,
                     upstream_override: None,
                     worker: std::env::current_exe()

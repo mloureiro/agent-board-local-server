@@ -4,7 +4,7 @@ use tauri::Wry;
 use crate::supervisor::table::ROWS;
 use crate::supervisor::StatusBoard;
 
-const IDLE_TOOLTIP: &str = "agent-board local server";
+pub const IDLE_TOOLTIP: &str = "agent-board local server";
 const FAILING_MARK: &str = "!";
 
 pub fn first_failing(board: &StatusBoard) -> Option<String> {

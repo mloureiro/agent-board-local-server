@@ -6,12 +6,16 @@ use std::sync::Mutex;
 use crate::paths::{AppPaths, APP_IDENTIFIER};
 use crate::worker::credentials;
 
-pub const ACCOUNTS: [&str; 4] = [
+pub const ACCOUNTS: [&str; 5] = [
     credentials::TOKEN_ACCOUNT,
     credentials::DATA_KEY_ACCOUNT,
     credentials::PENDING_TOKEN_ACCOUNT,
     credentials::PENDING_DATA_KEY_ACCOUNT,
+    LEGACY_PROXY_SECRET_ACCOUNT,
 ];
+
+// An earlier build stored the proxy secret in the Keychain under this account.
+const LEGACY_PROXY_SECRET_ACCOUNT: &str = "proxy-secret";
 
 #[derive(Debug)]
 pub struct SecretError(pub String);
@@ -114,7 +118,8 @@ impl SecretStore for MemoryStore {
 
 #[cfg(test)]
 pub mod testing {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     use super::{MemoryStore, SecretError, SecretStore};
 
@@ -141,6 +146,47 @@ pub mod testing {
 
         fn delete(&self, account: &str) -> Result<(), SecretError> {
             if self.armed.load(Ordering::SeqCst) {
+                return Err(SecretError("locked".into()));
+            }
+            self.inner.delete(account)
+        }
+    }
+
+    /// Numbers the `set` and `delete` calls from the last `count_from_here` and fails the listed ones, once each.
+    #[derive(Default)]
+    pub struct FailsAtCall {
+        inner: MemoryStore,
+        sets: AtomicUsize,
+        deletes: AtomicUsize,
+        failing_sets: Mutex<Vec<usize>>,
+        failing_deletes: Mutex<Vec<usize>>,
+    }
+
+    impl FailsAtCall {
+        pub fn count_from_here(&self, failing_sets: &[usize], failing_deletes: &[usize]) {
+            self.sets.store(0, Ordering::SeqCst);
+            self.deletes.store(0, Ordering::SeqCst);
+            *self.failing_sets.lock().unwrap() = failing_sets.to_vec();
+            *self.failing_deletes.lock().unwrap() = failing_deletes.to_vec();
+        }
+    }
+
+    impl SecretStore for FailsAtCall {
+        fn get(&self, account: &str) -> Result<Option<String>, SecretError> {
+            self.inner.get(account)
+        }
+
+        fn set(&self, account: &str, value: &str) -> Result<(), SecretError> {
+            let number = self.sets.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.failing_sets.lock().unwrap().contains(&number) {
+                return Err(SecretError("locked".into()));
+            }
+            self.inner.set(account, value)
+        }
+
+        fn delete(&self, account: &str) -> Result<(), SecretError> {
+            let number = self.deletes.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.failing_deletes.lock().unwrap().contains(&number) {
                 return Err(SecretError("locked".into()));
             }
             self.inner.delete(account)

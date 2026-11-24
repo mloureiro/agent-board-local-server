@@ -58,13 +58,39 @@ pub fn write_pending(
     store.set(PENDING_DATA_KEY_ACCOUNT, &credentials.data_key)
 }
 
-pub fn promote_pending(store: &dyn SecretStore) -> Result<(), SecretError> {
-    let Some(pending) = read_pair(store, PENDING_TOKEN_ACCOUNT, PENDING_DATA_KEY_ACCOUNT)? else {
+pub fn read_enrolled(store: &dyn SecretStore) -> Result<Option<Credentials>, SecretError> {
+    read_pair(store, TOKEN_ACCOUNT, DATA_KEY_ACCOUNT)
+}
+
+pub fn restore_enrolled(
+    store: &dyn SecretStore,
+    credentials: &Credentials,
+) -> Result<(), SecretError> {
+    store.set(TOKEN_ACCOUNT, &credentials.token)?;
+    store.set(DATA_KEY_ACCOUNT, &credentials.data_key)
+}
+
+/// The step of a promotion that failed, which decides what the caller must undo.
+#[derive(Debug)]
+pub enum PromoteFailure {
+    Token(SecretError),
+    DataKey(SecretError),
+    Discard(SecretError),
+}
+
+pub fn promote_pending(store: &dyn SecretStore) -> Result<(), PromoteFailure> {
+    let Some(pending) = read_pair(store, PENDING_TOKEN_ACCOUNT, PENDING_DATA_KEY_ACCOUNT)
+        .map_err(PromoteFailure::Token)?
+    else {
         return Ok(());
     };
-    store.set(TOKEN_ACCOUNT, &pending.token)?;
-    store.set(DATA_KEY_ACCOUNT, &pending.data_key)?;
-    discard_pending(store)
+    store
+        .set(TOKEN_ACCOUNT, &pending.token)
+        .map_err(PromoteFailure::Token)?;
+    store
+        .set(DATA_KEY_ACCOUNT, &pending.data_key)
+        .map_err(PromoteFailure::DataKey)?;
+    discard_pending(store).map_err(PromoteFailure::Discard)
 }
 
 pub fn pending_present(store: &dyn SecretStore) -> Result<bool, SecretError> {

@@ -242,8 +242,15 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
             }
             Err(PromoteFailure::DataKey(error)) => {
                 if let Err(undo) = self.restore(previous.as_ref()) {
-                    let message =
+                    let mut message =
                         format!("{error}; the previous pair could not be restored ({undo})");
+                    let cleaned =
+                        forget(self.secrets.as_ref()).and(discard_pending(self.secrets.as_ref()));
+                    if let Err(cleanup) = cleaned {
+                        message.push_str(&format!(
+                            "; the mixed pair could not be removed from the Keychain ({cleanup})"
+                        ));
+                    }
                     self.blocked(message.clone());
                     return Err(EnrolError::new(message));
                 }
@@ -720,8 +727,16 @@ mod tests {
         assert_eq!(rig.board.get(WORKER_LISTEN), Some(Status::NotConnected));
     }
 
+    fn blocked_reason(rig: &Rig) -> String {
+        let Some(Status::Blocked { reason }) = rig.board.get(WORKER_LISTEN) else {
+            panic!("the worker should be blocked");
+        };
+        reason
+    }
+
     #[tokio::test]
-    async fn a_failed_restore_blocks_the_worker_and_leaves_it_stopped() {
+    async fn a_failed_restore_blocks_the_worker_and_removes_the_mixed_pair_so_nothing_starts_on_it()
+    {
         let store = failing_store(true);
         let rig = rig(Init::Accepts, store.clone());
         started(&rig).await;
@@ -730,10 +745,13 @@ mod tests {
         rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
 
         assert_eq!(seen(&rig), ["init", "stop", "pause"]);
-        assert!(matches!(
-            rig.board.get(WORKER_LISTEN),
-            Some(Status::Blocked { .. })
-        ));
+        blocked_reason(&rig);
+        assert_eq!(enrolled_pair(&rig), (None, None));
+        assert!(!enrolled(rig.store.as_ref()).unwrap());
+        assert!(!pending_present(rig.store.as_ref()).unwrap());
+
+        rig.control.restart().await.unwrap_err();
+        assert_eq!(seen(&rig), ["init", "stop", "pause"]);
     }
 
     #[tokio::test]
@@ -747,10 +765,25 @@ mod tests {
         rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
 
         assert_eq!(seen(&rig), ["init", "pause"]);
-        assert!(matches!(
-            rig.board.get(WORKER_LISTEN),
-            Some(Status::Blocked { .. })
-        ));
+        blocked_reason(&rig);
+        assert!(!enrolled(rig.store.as_ref()).unwrap());
+        assert!(!pending_present(rig.store.as_ref()).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_failed_cleanup_after_a_failed_restore_puts_both_errors_in_the_blocked_reason() {
+        let store = failing_store(true);
+        let rig = rig(Init::Accepts, store.clone());
+        started(&rig).await;
+        store.count_from_here(&[4, 5], &[3, 5]);
+
+        rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
+
+        assert_eq!(seen(&rig), ["init", "stop", "pause"]);
+        let reason = blocked_reason(&rig);
+        assert!(reason.contains("could not be restored"));
+        assert!(reason.contains("could not be removed"));
+        assert!(!enrolled(rig.store.as_ref()).unwrap());
     }
 
     #[tokio::test]

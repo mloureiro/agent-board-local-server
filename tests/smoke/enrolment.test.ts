@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { PENDING_DATA_KEY_ACCOUNT, PENDING_HELPER_LINK, PENDING_TOKEN_ACCOUNT } from '../../scripts/app-constants.ts';
 import {
   alive,
   findByCommand,
@@ -130,17 +131,17 @@ describe('worker enrolment against the built board', () => {
     expect(readFileSync(join(runner.appRoot, 'worker/config/web.json'), 'utf8')).toBe(before);
     expect(machineInConfig()).toBe('tnk_two');
     expect(runner.tree().filter((pid) => treeBefore.includes(pid))).toEqual(treeBefore);
-    expect(keychainHas('worker-token-pending')).toBe(false);
-    expect(keychainHas('worker-data-key-pending')).toBe(false);
-    expect(credentialsLink('worker-credentials-pending').status).toBe(1);
+    expect(keychainHas(PENDING_TOKEN_ACCOUNT)).toBe(false);
+    expect(keychainHas(PENDING_DATA_KEY_ACCOUNT)).toBe(false);
+    expect(credentialsLink(PENDING_HELPER_LINK).status).toBe(1);
   }, 180_000);
 
   it('never serves a pending pair through the link the running worker uses', () => {
     const service = rootKeychainService(runner.appRoot);
     const plant = (account: string, value: string) =>
       spawnSync('security', ['add-generic-password', '-U', '-A', '-s', service, '-a', account, '-w', value]);
-    expect(plant('worker-token-pending', 'abm_pending-marker').status).toBe(0);
-    expect(plant('worker-data-key-pending', 'abk1_pending-marker').status).toBe(0);
+    expect(plant(PENDING_TOKEN_ACCOUNT, 'abm_pending-marker').status).toBe(0);
+    expect(plant(PENDING_DATA_KEY_ACCOUNT, 'abk1_pending-marker').status).toBe(0);
 
     const enrolled = credentialsLink('worker-credentials');
 
@@ -148,7 +149,7 @@ describe('worker enrolment against the built board', () => {
     expect(enrolled.stdout).toContain(`AGENT_BOARD_TOKEN=${issuedTokens[1]}`);
     expect(enrolled.stdout).not.toContain('pending-marker');
 
-    for (const account of ['worker-token-pending', 'worker-data-key-pending'])
+    for (const account of [PENDING_TOKEN_ACCOUNT, PENDING_DATA_KEY_ACCOUNT])
       spawnSync('security', ['delete-generic-password', '-s', service, '-a', account], { stdio: 'ignore' });
   });
 

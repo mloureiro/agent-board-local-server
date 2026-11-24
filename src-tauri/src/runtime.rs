@@ -356,13 +356,13 @@ fn prepare_worker(
     let setup = WorkerSetup {
         paths: config.paths.clone(),
         board: config.paths.worker_board(),
-        env: worker_env::environment(
+        base_env: worker_env::environment(
             &config.paths,
             &config.paths.worker_credentials(),
-            worker_path,
             &|name| std::env::var(name).ok(),
         ),
-        lockf: PathBuf::from("/usr/bin/lockf"),
+        worker_path: worker_path.to_vec(),
+        app_log: config.app_log.clone(),
     };
     let control = Arc::new(WorkerControl::new(
         setup,

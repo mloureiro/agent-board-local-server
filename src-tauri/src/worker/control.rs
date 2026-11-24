@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
@@ -11,9 +12,11 @@ use super::credentials::{
     PromoteFailure,
 };
 use super::enrol::{validate, BoardInit, EnrolError, InitReport, InitRunner};
+use super::env::with_path;
 use super::layout;
-use super::processes::{Processes, WorkerSetup};
+use super::processes::{Processes, WorkerSetup, WorkerStart};
 use super::shutdown::{kill_stragglers, pause_runs};
+use super::units;
 use crate::activity::{Activity, Guard, Kind};
 use crate::secrets::{SecretError, SecretStore};
 use crate::supervisor::table::{PROXY, WORKER, WORKER_LISTEN};
@@ -28,6 +31,7 @@ struct State {
     /// Detached runs outlive the supervised processes, so once the worker has started, stopping it still owes a pause.
     runs_possible: bool,
     stopping: bool,
+    env: Option<Arc<BTreeMap<String, String>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,8 +65,13 @@ impl From<SecretError> for ActionError {
 
 pub trait Host: Send + Sync {
     fn stop_processes(&self) -> impl Future<Output = ()> + Send;
-    fn start_processes(&self) -> impl Future<Output = ()> + Send;
-    fn pause_runs(&self, grace: Duration) -> impl Future<Output = ()> + Send;
+    fn read_units(&self) -> impl Future<Output = Result<WorkerStart, String>> + Send;
+    fn start_processes(&self, start: &WorkerStart) -> impl Future<Output = ()> + Send;
+    fn pause_runs(
+        &self,
+        env: &BTreeMap<String, String>,
+        grace: Duration,
+    ) -> impl Future<Output = ()> + Send;
     fn kill_stragglers(&self) -> impl Future<Output = ()> + Send;
     fn web_json_names(&self, url: &str) -> bool;
 }
@@ -77,12 +86,27 @@ impl Host for ProcessHost {
         self.processes.stop().await;
     }
 
-    async fn start_processes(&self) {
-        self.processes.start().await;
+    async fn read_units(&self) -> Result<WorkerStart, String> {
+        let setup = &self.setup;
+        let units = units::read(&setup.board, &setup.base_env, &setup.app_log).await?;
+        let env = with_path(
+            &setup.base_env,
+            &setup.paths,
+            &setup.worker_path,
+            &units.path,
+        );
+        Ok(WorkerStart {
+            env: Arc::new(env),
+            units,
+        })
     }
 
-    async fn pause_runs(&self, grace: Duration) {
-        pause_runs(&self.setup, grace).await;
+    async fn start_processes(&self, start: &WorkerStart) {
+        self.processes.start(start).await;
+    }
+
+    async fn pause_runs(&self, env: &BTreeMap<String, String>, grace: Duration) {
+        pause_runs(&self.setup, env, grace).await;
     }
 
     async fn kill_stragglers(&self) {
@@ -120,7 +144,6 @@ impl WorkerControl {
     ) -> Self {
         let init = BoardInit {
             board: setup.board.clone(),
-            env: setup.env.clone(),
             pending_credentials: setup.paths.worker_credentials_pending(),
         };
         let setup = Arc::new(setup);
@@ -149,7 +172,15 @@ impl WorkerControl {
     pub async fn check(&self) -> Result<usize, ActionError> {
         let _gate = self.begin(Kind::Recovery)?;
         let setup = &self.host.setup;
-        Ok(check::run(&setup.board, &setup.env, &self.check_log()).await)
+        let started = self.state.lock().await.env.clone();
+        let env = match started {
+            Some(env) => env,
+            None => match self.host.read_units().await {
+                Ok(start) => start.env,
+                Err(reason) => return Ok(check::fail(&self.check_log(), "worker units", &reason)),
+            },
+        };
+        Ok(check::run(&setup.board, &env, &self.check_log()).await)
     }
 }
 
@@ -202,13 +233,18 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
     }
 
     async fn connect(&self, state: &mut State, url: &str) {
-        self.host.pause_runs(START_PAUSE_GRACE).await;
+        let start = match self.host.read_units().await {
+            Ok(start) => start,
+            Err(reason) => return self.blocked(format!("worker units: {reason}")),
+        };
+        state.env = Some(start.env.clone());
+        self.host.pause_runs(&start.env, START_PAUSE_GRACE).await;
         if !self.host.web_json_names(url) {
-            if let Err(message) = self.init.run_init(url, Pair::Enrolled).await {
+            if let Err(message) = self.init.run_init(url, Pair::Enrolled, &start.env).await {
                 return self.blocked(format!("board init: {message}"));
             }
         }
-        self.host.start_processes().await;
+        self.host.start_processes(&start).await;
         state.started = true;
         state.runs_possible = true;
     }
@@ -224,20 +260,33 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
         let Some(url) = self.proxy_url() else {
             return Err(EnrolError::new("the board is not running yet"));
         };
-        let InitReport { machine } =
-            validate(self.secrets.as_ref(), &self.init, &url, token, data_key).await?;
+        let start = self
+            .host
+            .read_units()
+            .await
+            .map_err(|reason| EnrolError::new(format!("worker units: {reason}")))?;
+        let InitReport { machine } = validate(
+            self.secrets.as_ref(),
+            &self.init,
+            &url,
+            token,
+            data_key,
+            &start.env,
+        )
+        .await?;
         let previous = read_enrolled(self.secrets.as_ref())?;
         let was_started = state.started;
         if was_started {
             self.host.stop_processes().await;
             state.started = false;
         }
-        self.host.pause_runs(START_PAUSE_GRACE).await;
+        state.env = Some(start.env.clone());
+        self.host.pause_runs(&start.env, START_PAUSE_GRACE).await;
         match promote_pending(self.secrets.as_ref()) {
             Ok(()) | Err(PromoteFailure::Discard(_)) => {}
             Err(PromoteFailure::Token(error)) => {
                 return self
-                    .abandon_promotion(&mut state, was_started, error.to_string())
+                    .abandon_promotion(&mut state, &start, was_started, error.to_string())
                     .await;
             }
             Err(PromoteFailure::DataKey(error)) => {
@@ -255,11 +304,11 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
                     return Err(EnrolError::new(message));
                 }
                 return self
-                    .abandon_promotion(&mut state, was_started, error.to_string())
+                    .abandon_promotion(&mut state, &start, was_started, error.to_string())
                     .await;
             }
         }
-        self.host.start_processes().await;
+        self.host.start_processes(&start).await;
         state.started = true;
         state.runs_possible = true;
         Ok(Enrolled { machine })
@@ -282,15 +331,22 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
     async fn abandon_promotion(
         &self,
         state: &mut State,
+        start: &WorkerStart,
         was_started: bool,
         message: String,
     ) -> Result<Enrolled, EnrolError> {
         let _ = discard_pending(self.secrets.as_ref());
         if was_started {
-            self.host.start_processes().await;
+            self.host.start_processes(start).await;
             state.started = true;
         }
         Err(EnrolError::new(message))
+    }
+
+    async fn pause_with_last_env(&self, state: &State) {
+        if let Some(env) = &state.env {
+            self.host.pause_runs(env, QUIT_PAUSE_GRACE).await;
+        }
     }
 
     pub async fn restart(&self) -> Result<(), ActionError> {
@@ -301,7 +357,15 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
         }
         if state.started {
             self.host.stop_processes().await;
-            self.host.start_processes().await;
+            state.started = false;
+            match self.host.read_units().await {
+                Ok(start) => {
+                    state.env = Some(start.env.clone());
+                    self.host.start_processes(&start).await;
+                    state.started = true;
+                }
+                Err(reason) => self.blocked(format!("worker units: {reason}")),
+            }
             return Ok(());
         }
         if !enrolled(self.secrets.as_ref())? {
@@ -323,7 +387,7 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
         self.host.stop_processes().await;
         state.started = false;
         if state.runs_possible {
-            self.host.pause_runs(QUIT_PAUSE_GRACE).await;
+            self.pause_with_last_env(&state).await;
             state.runs_possible = false;
         }
         let forgotten = forget(self.secrets.as_ref()).and(discard_pending(self.secrets.as_ref()));
@@ -341,7 +405,7 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
         state.stopping = true;
         self.host.stop_processes().await;
         if state.runs_possible {
-            self.host.pause_runs(QUIT_PAUSE_GRACE).await;
+            self.pause_with_last_env(&state).await;
         }
         self.host.kill_stragglers().await;
     }
@@ -351,9 +415,11 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
 mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
+    use crate::applog::LogFile;
     use crate::paths::AppPaths;
     use crate::secrets::testing::FailsAtCall;
     use crate::secrets::MemoryStore;
@@ -362,12 +428,21 @@ mod tests {
     };
 
     use super::*;
+    use crate::worker::units::{ServiceUnit, TickUnit, WorkerUnits};
 
     type Events = Arc<StdMutex<Vec<&'static str>>>;
 
     struct FakeHost {
         events: Events,
         web_json_url: &'static str,
+        units_readable: Arc<AtomicBool>,
+        reads: AtomicUsize,
+        paused_with: Arc<StdMutex<Vec<String>>>,
+        started_with: Arc<StdMutex<Vec<String>>>,
+    }
+
+    fn path_of(env: &BTreeMap<String, String>) -> String {
+        env.get("PATH").cloned().unwrap_or_default()
     }
 
     impl Host for FakeHost {
@@ -375,12 +450,47 @@ mod tests {
             self.events.lock().unwrap().push("stop");
         }
 
-        async fn start_processes(&self) {
-            self.events.lock().unwrap().push("start");
+        async fn read_units(&self) -> Result<WorkerStart, String> {
+            self.events.lock().unwrap().push("units");
+            if !self.units_readable.load(Ordering::SeqCst) {
+                return Err("the script exited with 1".into());
+            }
+            let read = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+            let service = |row| ServiceUnit {
+                row,
+                program: "/cli/board".into(),
+                args: Vec::new(),
+            };
+            Ok(WorkerStart {
+                env: Arc::new(BTreeMap::from([(
+                    "PATH".to_owned(),
+                    format!("/read-{read}"),
+                )])),
+                units: WorkerUnits {
+                    path: "/units".into(),
+                    dispatch: TickUnit {
+                        row: crate::supervisor::table::DISPATCH,
+                        program: "/cli/board".into(),
+                        args: Vec::new(),
+                        every: Duration::from_secs(120),
+                        limit: Duration::from_secs(110),
+                        grace: Duration::from_secs(10),
+                        lock_held: 75,
+                    },
+                    listen: service(WORKER_LISTEN),
+                    watch: service(crate::supervisor::table::WORKER_WATCH),
+                },
+            })
         }
 
-        async fn pause_runs(&self, _grace: Duration) {
+        async fn start_processes(&self, start: &WorkerStart) {
+            self.events.lock().unwrap().push("start");
+            self.started_with.lock().unwrap().push(path_of(&start.env));
+        }
+
+        async fn pause_runs(&self, env: &BTreeMap<String, String>, _grace: Duration) {
             self.events.lock().unwrap().push("pause");
+            self.paused_with.lock().unwrap().push(path_of(env));
         }
 
         async fn kill_stragglers(&self) {
@@ -401,13 +511,20 @@ mod tests {
     struct FakeInit {
         events: Events,
         pairs: Arc<StdMutex<Vec<Pair>>>,
+        init_with: Arc<StdMutex<Vec<String>>>,
         behaviour: Init,
     }
 
     impl InitRunner for FakeInit {
-        async fn run_init(&self, _url: &str, pair: Pair) -> Result<InitReport, String> {
+        async fn run_init(
+            &self,
+            _url: &str,
+            pair: Pair,
+            env: &BTreeMap<String, String>,
+        ) -> Result<InitReport, String> {
             self.events.lock().unwrap().push("init");
             self.pairs.lock().unwrap().push(pair);
+            self.init_with.lock().unwrap().push(path_of(env));
             match &self.behaviour {
                 Init::Accepts => Ok(InitReport {
                     machine: Some("tnk_one".into()),
@@ -422,6 +539,10 @@ mod tests {
         control: WorkerControl<FakeHost, FakeInit>,
         events: Events,
         pairs: Arc<StdMutex<Vec<Pair>>>,
+        units_readable: Arc<AtomicBool>,
+        paused_with: Arc<StdMutex<Vec<String>>>,
+        started_with: Arc<StdMutex<Vec<String>>>,
+        init_with: Arc<StdMutex<Vec<String>>>,
         board: Arc<StatusBoard>,
         store: Arc<dyn SecretStore>,
         activity: Arc<Activity>,
@@ -438,6 +559,10 @@ mod tests {
     ) -> Rig {
         let events: Events = Arc::default();
         let pairs = Arc::default();
+        let units_readable = Arc::new(AtomicBool::new(true));
+        let paused_with = Arc::<StdMutex<Vec<String>>>::default();
+        let started_with = Arc::<StdMutex<Vec<String>>>::default();
+        let init_with = Arc::<StdMutex<Vec<String>>>::default();
         let activity = Arc::new(Activity::default());
         let board = Arc::new(StatusBoard::default());
         board.set(PROXY, Status::Running { port: 4785 });
@@ -445,10 +570,15 @@ mod tests {
             FakeHost {
                 events: events.clone(),
                 web_json_url,
+                units_readable: units_readable.clone(),
+                reads: AtomicUsize::new(0),
+                paused_with: paused_with.clone(),
+                started_with: started_with.clone(),
             },
             FakeInit {
                 events: events.clone(),
                 pairs: Arc::clone(&pairs),
+                init_with: init_with.clone(),
                 behaviour,
             },
             store.clone(),
@@ -459,6 +589,10 @@ mod tests {
             control,
             events,
             pairs,
+            units_readable,
+            paused_with,
+            started_with,
+            init_with,
             board,
             store,
             activity,
@@ -488,7 +622,7 @@ mod tests {
 
         rig.control.enrol("abm_new", "abk1_new").await.unwrap();
 
-        assert_eq!(seen(&rig), ["init", "stop", "pause", "start"]);
+        assert_eq!(seen(&rig), ["units", "init", "stop", "pause", "start"]);
         assert_eq!(*rig.pairs.lock().unwrap(), [Pair::Pending]);
         assert_eq!(
             rig.store.get(TOKEN_ACCOUNT).unwrap().as_deref(),
@@ -515,7 +649,7 @@ mod tests {
 
         rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
 
-        assert_eq!(seen(&rig), ["init"]);
+        assert_eq!(seen(&rig), ["units", "init"]);
         assert_eq!(rig.board.get(WORKER_LISTEN), before);
         assert_eq!(
             rig.store.get(TOKEN_ACCOUNT).unwrap().as_deref(),
@@ -531,7 +665,7 @@ mod tests {
 
         rig.control.enrol("abm_new", "abk1_new").await.unwrap();
 
-        assert_eq!(seen(&rig), ["init", "pause", "start"]);
+        assert_eq!(seen(&rig), ["units", "init", "pause", "start"]);
     }
 
     #[tokio::test]
@@ -541,7 +675,7 @@ mod tests {
 
         rig.control.restart().await.unwrap();
 
-        assert_eq!(seen(&rig), ["stop", "start"]);
+        assert_eq!(seen(&rig), ["stop", "units", "start"]);
     }
 
     #[tokio::test]
@@ -552,7 +686,7 @@ mod tests {
 
         rig.control.restart().await.unwrap();
 
-        assert_eq!(seen(&rig), ["pause", "init"]);
+        assert_eq!(seen(&rig), ["units", "pause", "init"]);
         assert_eq!(*rig.pairs.lock().unwrap(), [Pair::Enrolled, Pair::Enrolled]);
     }
 
@@ -588,7 +722,7 @@ mod tests {
 
         rig.control.enrol("abm_new", "abk1_new").await.unwrap();
 
-        assert_eq!(seen(&rig), ["init", "pause", "start"]);
+        assert_eq!(seen(&rig), ["units", "init", "pause", "start"]);
     }
 
     #[tokio::test]
@@ -676,7 +810,7 @@ mod tests {
 
         rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
 
-        assert_eq!(seen(&rig), ["init", "stop", "pause", "start"]);
+        assert_eq!(seen(&rig), ["units", "init", "stop", "pause", "start"]);
         assert_eq!(enrolled_pair(&rig), old_pair());
         assert!(!pending_present(rig.store.as_ref()).unwrap());
     }
@@ -691,7 +825,7 @@ mod tests {
 
         rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
 
-        assert_eq!(seen(&rig), ["init", "pause"]);
+        assert_eq!(seen(&rig), ["units", "init", "pause"]);
         assert_eq!(enrolled_pair(&rig), (None, None));
         assert!(!pending_present(rig.store.as_ref()).unwrap());
     }
@@ -705,7 +839,7 @@ mod tests {
 
         rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
 
-        assert_eq!(seen(&rig), ["init", "stop", "pause", "start"]);
+        assert_eq!(seen(&rig), ["units", "init", "stop", "pause", "start"]);
         assert_eq!(enrolled_pair(&rig), old_pair());
         assert!(!pending_present(rig.store.as_ref()).unwrap());
     }
@@ -721,7 +855,7 @@ mod tests {
 
         rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
 
-        assert_eq!(seen(&rig), ["init", "pause"]);
+        assert_eq!(seen(&rig), ["units", "init", "pause"]);
         assert_eq!(enrolled_pair(&rig), (None, None));
         assert!(!pending_present(rig.store.as_ref()).unwrap());
         assert_eq!(rig.board.get(WORKER_LISTEN), Some(Status::NotConnected));
@@ -744,14 +878,14 @@ mod tests {
 
         rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
 
-        assert_eq!(seen(&rig), ["init", "stop", "pause"]);
+        assert_eq!(seen(&rig), ["units", "init", "stop", "pause"]);
         blocked_reason(&rig);
         assert_eq!(enrolled_pair(&rig), (None, None));
         assert!(!enrolled(rig.store.as_ref()).unwrap());
         assert!(!pending_present(rig.store.as_ref()).unwrap());
 
         rig.control.restart().await.unwrap_err();
-        assert_eq!(seen(&rig), ["init", "stop", "pause"]);
+        assert_eq!(seen(&rig), ["units", "init", "stop", "pause"]);
     }
 
     #[tokio::test]
@@ -764,7 +898,7 @@ mod tests {
 
         rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
 
-        assert_eq!(seen(&rig), ["init", "pause"]);
+        assert_eq!(seen(&rig), ["units", "init", "pause"]);
         blocked_reason(&rig);
         assert!(!enrolled(rig.store.as_ref()).unwrap());
         assert!(!pending_present(rig.store.as_ref()).unwrap());
@@ -779,7 +913,7 @@ mod tests {
 
         rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
 
-        assert_eq!(seen(&rig), ["init", "stop", "pause"]);
+        assert_eq!(seen(&rig), ["units", "init", "stop", "pause"]);
         let reason = blocked_reason(&rig);
         assert!(reason.contains("could not be restored"));
         assert!(reason.contains("could not be removed"));
@@ -796,7 +930,7 @@ mod tests {
         let done = rig.control.enrol("abm_new", "abk1_new").await.unwrap();
 
         assert_eq!(done.machine.as_deref(), Some("tnk_one"));
-        assert_eq!(seen(&rig), ["init", "stop", "pause", "start"]);
+        assert_eq!(seen(&rig), ["units", "init", "stop", "pause", "start"]);
         assert_eq!(
             enrolled_pair(&rig),
             (Some("abm_new".into()), Some("abk1_new".into()))
@@ -828,7 +962,7 @@ mod tests {
 
         rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
 
-        assert_eq!(seen(&rig), ["init"]);
+        assert_eq!(seen(&rig), ["units", "init"]);
     }
 
     #[test]
@@ -853,8 +987,9 @@ mod tests {
             WorkerSetup {
                 paths,
                 board: PathBuf::new(),
-                env: BTreeMap::new(),
-                lockf: PathBuf::new(),
+                base_env: BTreeMap::new(),
+                worker_path: Vec::new(),
+                app_log: LogFile::new(PathBuf::new()),
             },
             store.clone(),
             Arc::new(StatusBoard::default()),
@@ -874,7 +1009,7 @@ mod tests {
 
         rig.control.proxy_ready().await;
 
-        assert_eq!(seen(&rig), ["pause", "init", "start"]);
+        assert_eq!(seen(&rig), ["units", "pause", "init", "start"]);
     }
 
     #[tokio::test]
@@ -883,7 +1018,7 @@ mod tests {
 
         rig.control.proxy_ready().await;
 
-        assert_eq!(seen(&rig), ["pause", "start"]);
+        assert_eq!(seen(&rig), ["units", "pause", "start"]);
     }
 
     #[tokio::test]
@@ -892,19 +1027,102 @@ mod tests {
 
         rig.control.proxy_ready().await;
 
-        assert_eq!(seen(&rig), ["pause", "init"]);
+        assert_eq!(seen(&rig), ["units", "pause", "init"]);
         let Some(Status::Blocked { reason }) = rig.board.get(WORKER_LISTEN) else {
             panic!("the worker should be blocked");
         };
         assert!(reason.starts_with("board init:"));
     }
 
+    fn blocked_on_units(rig: &Rig) {
+        assert!(blocked_reason(rig).starts_with("worker units:"));
+    }
+
+    #[tokio::test]
+    async fn a_start_reads_the_units_once_and_its_environment_serves_the_pause_the_init_and_the_processes(
+    ) {
+        let rig = rig_with_web_json(Init::Accepts, enrolled_store(), "http://127.0.0.1:4790");
+
+        rig.control.proxy_ready().await;
+
+        assert_eq!(seen(&rig), ["units", "pause", "init", "start"]);
+        for used in [&rig.paused_with, &rig.init_with, &rig.started_with] {
+            assert_eq!(*used.lock().unwrap(), ["/read-1"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_unit_list_at_connect_leaves_the_worker_stopped_and_quit_pauses_nothing()
+    {
+        let rig = rig(Init::Accepts, enrolled_store());
+        rig.units_readable.store(false, Ordering::SeqCst);
+
+        rig.control.proxy_ready().await;
+
+        assert_eq!(seen(&rig), ["units"]);
+        blocked_on_units(&rig);
+        rig.control.stop().await;
+        assert_eq!(seen(&rig), ["units", "stop", "kill"]);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_unit_list_fails_the_enrolment_before_anything_is_checked_stopped_or_promoted(
+    ) {
+        let rig = rig(Init::Accepts, enrolled_store());
+        started(&rig).await;
+        rig.units_readable.store(false, Ordering::SeqCst);
+
+        let error = rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
+
+        assert!(error.to_string().starts_with("worker units:"));
+        assert_eq!(seen(&rig), ["units"]);
+        assert_eq!(
+            rig.store.get(TOKEN_ACCOUNT).unwrap().as_deref(),
+            Some("abm_old")
+        );
+        assert!(!pending_present(rig.store.as_ref()).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_restart_that_cannot_read_the_units_leaves_the_worker_stopped_and_quit_pauses_with_the_previous_environment(
+    ) {
+        let rig = rig(Init::Accepts, enrolled_store());
+        started(&rig).await;
+        rig.units_readable.store(false, Ordering::SeqCst);
+
+        rig.control.restart().await.unwrap();
+
+        assert_eq!(seen(&rig), ["stop", "units"]);
+        blocked_on_units(&rig);
+        rig.events.lock().unwrap().clear();
+        rig.paused_with.lock().unwrap().clear();
+        rig.control.stop().await;
+        assert_eq!(seen(&rig), ["stop", "pause", "kill"]);
+        assert_eq!(*rig.paused_with.lock().unwrap(), ["/read-1"]);
+    }
+
+    #[tokio::test]
+    async fn a_restart_after_a_failed_read_connects_again_with_a_fresh_read() {
+        let rig = rig(Init::Accepts, enrolled_store());
+        started(&rig).await;
+        rig.units_readable.store(false, Ordering::SeqCst);
+        rig.control.restart().await.unwrap();
+        rig.units_readable.store(true, Ordering::SeqCst);
+        rig.events.lock().unwrap().clear();
+
+        rig.control.restart().await.unwrap();
+
+        assert_eq!(seen(&rig), ["units", "pause", "start"]);
+        assert_eq!(rig.started_with.lock().unwrap().last().unwrap(), "/read-2");
+    }
+
     fn host_over(root: &Path) -> ProcessHost {
         let setup = Arc::new(WorkerSetup {
             paths: AppPaths::new(root),
             board: PathBuf::new(),
-            env: BTreeMap::new(),
-            lockf: PathBuf::new(),
+            base_env: BTreeMap::new(),
+            worker_path: Vec::new(),
+            app_log: LogFile::new(PathBuf::new()),
         });
         ProcessHost {
             processes: Processes::new(setup.clone(), Arc::new(StatusBoard::default())),
@@ -955,5 +1173,57 @@ mod tests {
             web_json(root.path(), contents);
             assert!(!host.web_json_names(URL), "{contents}");
         }
+    }
+    const FAILING_UNITS: &str =
+        "#!/bin/sh\nif [ \"$1\" = internal ]; then echo broken >&2; exit 1; fi\necho '[]'\n";
+
+    fn control_over_a_script(root: &Path) -> WorkerControl {
+        use std::os::unix::fs::PermissionsExt;
+
+        let paths = AppPaths::new(root);
+        let script = root.join("board");
+        std::fs::write(&script, FAILING_UNITS).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        WorkerControl::new(
+            WorkerSetup {
+                app_log: LogFile::new(root.join("app.log")),
+                paths,
+                board: script,
+                base_env: BTreeMap::new(),
+                worker_path: Vec::new(),
+            },
+            Arc::new(MemoryStore::default()),
+            Arc::new(StatusBoard::default()),
+            Arc::new(Activity::default()),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_check_runs_with_the_environment_of_the_last_start() {
+        let root = tempfile::tempdir().unwrap();
+        let control = control_over_a_script(root.path());
+        control.state.lock().await.env = Some(Arc::new(BTreeMap::from([(
+            "PATH".to_owned(),
+            "/started/bin".to_owned(),
+        )])));
+
+        control.check().await.unwrap();
+
+        let log = std::fs::read_to_string(control.check_log()).unwrap();
+        assert!(log.contains("(/started/bin)"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn the_check_of_a_worker_that_never_started_reads_the_units_and_counts_a_failure_when_it_cannot(
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let control = control_over_a_script(root.path());
+
+        let problems = control.check().await.unwrap();
+
+        assert_eq!(problems, 1);
+        let log = std::fs::read_to_string(control.check_log()).unwrap();
+        assert!(log.contains("fail worker units:"), "{log}");
+        assert!(log.contains("broken"), "{log}");
     }
 }

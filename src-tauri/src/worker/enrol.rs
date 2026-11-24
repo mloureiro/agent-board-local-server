@@ -49,24 +49,23 @@ pub trait InitRunner: Send + Sync {
         &self,
         url: &str,
         pair: Pair,
+        env: &BTreeMap<String, String>,
     ) -> impl Future<Output = Result<InitReport, String>> + Send;
 }
 
 pub struct BoardInit {
     pub board: PathBuf,
-    pub env: BTreeMap<String, String>,
     pub pending_credentials: PathBuf,
 }
 
 impl BoardInit {
-    fn config_path(&self) -> Option<PathBuf> {
-        self.env
-            .get("AGENT_BOARD_CONFIG_DIR")
+    fn config_path(env: &BTreeMap<String, String>) -> Option<PathBuf> {
+        env.get("AGENT_BOARD_CONFIG_DIR")
             .map(|dir| PathBuf::from(dir).join("config.json"))
     }
 
-    fn environment(&self, pair: Pair) -> BTreeMap<String, String> {
-        let mut env = self.env.clone();
+    fn environment(&self, pair: Pair, env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+        let mut env = env.clone();
         if pair == Pair::Pending {
             env.insert(
                 CREDENTIALS_COMMAND.to_owned(),
@@ -76,11 +75,16 @@ impl BoardInit {
         env
     }
 
-    async fn run_board_init(&self, url: &str, pair: Pair) -> Result<(), String> {
+    async fn run_board_init(
+        &self,
+        url: &str,
+        pair: Pair,
+        env: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
         let run = Command::new(&self.board)
             .args(["init", "--url", url, "--force"])
             .env_clear()
-            .envs(self.environment(pair))
+            .envs(self.environment(pair, env))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -103,10 +107,15 @@ impl BoardInit {
 }
 
 impl InitRunner for BoardInit {
-    async fn run_init(&self, url: &str, pair: Pair) -> Result<InitReport, String> {
-        self.run_board_init(url, pair).await?;
+    async fn run_init(
+        &self,
+        url: &str,
+        pair: Pair,
+        env: &BTreeMap<String, String>,
+    ) -> Result<InitReport, String> {
+        self.run_board_init(url, pair, env).await?;
         Ok(InitReport {
-            machine: self.config_path().and_then(|path| machine::read(&path)),
+            machine: Self::config_path(env).and_then(|path| machine::read(&path)),
         })
     }
 }
@@ -190,6 +199,7 @@ pub async fn validate<R: InitRunner>(
     url: &str,
     token: &str,
     data_key: &str,
+    env: &BTreeMap<String, String>,
 ) -> Result<InitReport, EnrolError> {
     let credentials = Credentials {
         token: bare_value(token, "AGENT_BOARD_TOKEN"),
@@ -203,7 +213,7 @@ pub async fn validate<R: InitRunner>(
 
     discard_pending(store)?;
     write_pending(store, &credentials)?;
-    match runner.run_init(url, Pair::Pending).await {
+    match runner.run_init(url, Pair::Pending, env).await {
         Ok(report) => Ok(report),
         Err(message) => Err(with_cleanup(
             EnrolError::new(scrub(
@@ -239,12 +249,19 @@ mod tests {
     struct FakeInit {
         outcome: Result<InitReport, String>,
         seen_by_helper: Mutex<Option<String>>,
+        seen_env: Mutex<BTreeMap<String, String>>,
         store: std::sync::Arc<MemoryStore>,
     }
 
     impl InitRunner for FakeInit {
-        async fn run_init(&self, _url: &str, pair: Pair) -> Result<InitReport, String> {
+        async fn run_init(
+            &self,
+            _url: &str,
+            pair: Pair,
+            env: &BTreeMap<String, String>,
+        ) -> Result<InitReport, String> {
             assert_eq!(pair, Pair::Pending);
+            *self.seen_env.lock().unwrap() = env.clone();
             *self.seen_by_helper.lock().unwrap() = helper_output(self.store.as_ref(), pair).ok();
             self.outcome.clone()
         }
@@ -254,6 +271,7 @@ mod tests {
         FakeInit {
             outcome,
             seen_by_helper: Mutex::new(None),
+            seen_env: Mutex::default(),
             store: store.clone(),
         }
     }
@@ -274,6 +292,7 @@ mod tests {
             "http://127.0.0.1:4785",
             "AGENT_BOARD_TOKEN=abm_pasted-wrong",
             "abk1_new",
+            &BTreeMap::new(),
         )
         .await
         .unwrap_err();
@@ -296,7 +315,12 @@ mod tests {
     struct ArmsTheStore(std::sync::Arc<DeletesFailWhenArmed>);
 
     impl InitRunner for ArmsTheStore {
-        async fn run_init(&self, _url: &str, _pair: Pair) -> Result<InitReport, String> {
+        async fn run_init(
+            &self,
+            _url: &str,
+            _pair: Pair,
+            _env: &BTreeMap<String, String>,
+        ) -> Result<InitReport, String> {
             self.0.arm();
             Err("refused".into())
         }
@@ -312,6 +336,7 @@ mod tests {
             "http://127.0.0.1:4785",
             "abm_new",
             "abk1_new",
+            &BTreeMap::new(),
         )
         .await
         .unwrap_err();
@@ -332,9 +357,20 @@ mod tests {
             "http://127.0.0.1:4785",
             " AGENT_BOARD_TOKEN=abm_fresh \n",
             "AGENT_BOARD_DATA_KEY=abk1_fresh",
+            &BTreeMap::from([("PATH".to_owned(), "/units/bin".to_owned())]),
         )
         .await
         .unwrap();
+
+        assert_eq!(
+            runner
+                .seen_env
+                .lock()
+                .unwrap()
+                .get("PATH")
+                .map(String::as_str),
+            Some("/units/bin")
+        );
 
         let pending = "AGENT_BOARD_TOKEN=abm_fresh\nAGENT_BOARD_DATA_KEY=abk1_fresh\n";
         assert_eq!(
@@ -361,6 +397,7 @@ mod tests {
             "http://127.0.0.1:4785",
             "abm_x\nAGENT_BOARD_DATA_KEY=abk1_injected",
             "abk1_real",
+            &BTreeMap::new(),
         )
         .await
         .unwrap_err();

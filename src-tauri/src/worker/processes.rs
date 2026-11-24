@@ -9,55 +9,43 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use super::report::worker_note;
+use super::units::{ServiceUnit, TickUnit, WorkerUnits};
+use crate::applog::LogFile;
 use crate::localtime::clock;
 use crate::paths::AppPaths;
 use crate::supervisor::process::stop_requested;
-use crate::supervisor::table::{DISPATCH, WORKER, WORKER_LISTEN, WORKER_WATCH};
+use crate::supervisor::table::{DISPATCH, WORKER};
 use crate::supervisor::{
     supervise, Launcher, NoReadiness, ProcessSpec, RunningProcess, Spawned, Status, StatusBoard,
 };
 
-const TICK_EVERY: Duration = Duration::from_secs(120);
-const TICK_LIMIT: Duration = Duration::from_secs(110);
-const TICK_GRACE: Duration = Duration::from_secs(10);
 const STOP_GRACE: Duration = Duration::from_secs(10);
-const LOCK_FILE: &str = "agent-board-dispatch.lock";
-/// `lockf -s -t 0` exits with EX_TEMPFAIL when another tick holds the lock.
-const LOCK_HELD: i32 = 75;
 
 pub struct WorkerSetup {
     pub paths: AppPaths,
     pub board: PathBuf,
-    pub env: BTreeMap<String, String>,
-    pub lockf: PathBuf,
+    pub base_env: BTreeMap<String, String>,
+    pub worker_path: Vec<PathBuf>,
+    pub app_log: LogFile,
 }
 
-impl WorkerSetup {
-    pub fn spec(&self, name: &'static str, args: &[&str]) -> ProcessSpec {
-        ProcessSpec {
-            name,
-            program: self.board.clone(),
-            args: args.iter().map(OsString::from).collect(),
-            env: self.env.clone(),
-        }
-    }
+#[derive(Debug, Clone)]
+pub struct WorkerStart {
+    pub env: Arc<BTreeMap<String, String>>,
+    pub units: WorkerUnits,
+}
 
-    fn tick_spec(&self) -> ProcessSpec {
-        let lock = self.paths.worker_run_dir().join(LOCK_FILE);
-        ProcessSpec {
-            name: DISPATCH,
-            program: self.lockf.clone(),
-            args: vec![
-                "-s".into(),
-                "-t".into(),
-                "0".into(),
-                lock.into_os_string(),
-                self.board.clone().into_os_string(),
-                "internal".into(),
-                "dispatch".into(),
-            ],
-            env: self.env.clone(),
-        }
+fn spec(
+    name: &'static str,
+    program: &str,
+    args: &[String],
+    env: &Arc<BTreeMap<String, String>>,
+) -> ProcessSpec {
+    ProcessSpec {
+        name,
+        program: PathBuf::from(program),
+        args: args.iter().map(OsString::from).collect(),
+        env: env.as_ref().clone(),
     }
 }
 
@@ -72,24 +60,29 @@ pub enum TickResult {
 
 impl TickResult {
     /// An exit with the lock-held code is another tick at work, never a failure.
-    pub fn classify(code: Option<i32>, signal: Option<i32>, timed_out: bool) -> Self {
+    pub fn classify(
+        code: Option<i32>,
+        signal: Option<i32>,
+        timed_out: bool,
+        lock_held: i32,
+    ) -> Self {
         match (timed_out, code, signal) {
             (true, _, _) => Self::TimedOut,
             (false, Some(0), _) => Self::Ok,
-            (false, Some(LOCK_HELD), _) => Self::LockHeld,
+            (false, Some(code), _) if code == lock_held => Self::LockHeld,
             (false, Some(code), _) => Self::Failed(code),
             (false, None, Some(signal)) => Self::Killed(signal),
             (false, None, None) => Self::Failed(-1),
         }
     }
 
-    fn label(&self, at: &str) -> String {
+    fn label(&self, at: &str, limit: Duration) -> String {
         match self {
             Self::Ok => format!("ok at {at}"),
             Self::LockHeld => format!("lock held by another tick at {at}"),
             Self::Failed(code) => format!("failed with exit code {code} at {at}"),
             Self::Killed(signal) => format!("killed by signal {signal} at {at}"),
-            Self::TimedOut => format!("stopped after {} s at {at}", TICK_LIMIT.as_secs()),
+            Self::TimedOut => format!("stopped after {} s at {at}", limit.as_secs()),
         }
     }
 }
@@ -114,7 +107,7 @@ impl Processes {
         }
     }
 
-    pub async fn start(&self) {
+    pub async fn start(&self, start: &WorkerStart) {
         let mut running = self.running.lock().await;
         if running.is_some() {
             return;
@@ -128,20 +121,22 @@ impl Processes {
             supervise_worker(
                 &self.setup,
                 &self.board,
-                WORKER_LISTEN,
-                &["internal", "listen"],
+                &start.units.listen,
+                &start.env,
                 stopped.clone(),
             ),
             supervise_worker(
                 &self.setup,
                 &self.board,
-                WORKER_WATCH,
-                &["internal", "watch"],
+                &start.units.watch,
+                &start.env,
                 stopped.clone(),
             ),
             tokio::spawn(dispatch_timer(
                 self.setup.clone(),
                 self.board.clone(),
+                start.units.dispatch.clone(),
+                start.env.clone(),
                 stopped,
             )),
         ];
@@ -161,15 +156,21 @@ impl Processes {
 
 struct WorkerLauncher {
     setup: Arc<WorkerSetup>,
-    name: &'static str,
-    args: &'static [&'static str],
+    unit: ServiceUnit,
+    env: Arc<BTreeMap<String, String>>,
 }
 
 impl Launcher for WorkerLauncher {
     type Process = Spawned;
 
     fn launch(&mut self) -> Result<Spawned, String> {
-        RunningProcess::spawn(&self.setup.spec(self.name, self.args), &self.setup.paths)
+        let spec = spec(
+            self.unit.row,
+            &self.unit.program,
+            &self.unit.args,
+            &self.env,
+        );
+        RunningProcess::spawn(&spec, &self.setup.paths)
             .map(|process| Spawned::new(process, Status::Note("running".into())))
             .map_err(|error| format!("cannot start: {error}"))
     }
@@ -178,21 +179,21 @@ impl Launcher for WorkerLauncher {
 fn supervise_worker(
     setup: &Arc<WorkerSetup>,
     board: &Arc<StatusBoard>,
-    name: &'static str,
-    args: &'static [&'static str],
+    unit: &ServiceUnit,
+    env: &Arc<BTreeMap<String, String>>,
     stop: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     let (_commands, received) = mpsc::channel(1);
     tokio::spawn(supervise(
-        name,
+        unit.row,
         WorkerLauncher {
             setup: setup.clone(),
-            name,
-            args,
+            unit: unit.clone(),
+            env: env.clone(),
         },
         None::<NoReadiness>,
         board.clone(),
-        setup.paths.log_file(name),
+        setup.paths.log_file(unit.row),
         stop,
         received,
     ))
@@ -203,17 +204,22 @@ enum Tick {
     Stopped,
 }
 
-async fn run_tick(setup: &WorkerSetup, stop: &mut watch::Receiver<bool>) -> Result<Tick, String> {
+async fn run_tick(
+    setup: &WorkerSetup,
+    tick: &TickUnit,
+    env: &Arc<BTreeMap<String, String>>,
+    stop: &mut watch::Receiver<bool>,
+) -> Result<Tick, String> {
     use std::os::unix::process::ExitStatusExt;
-    let mut process = RunningProcess::spawn(&setup.tick_spec(), &setup.paths)
+    let mut process = RunningProcess::spawn(&tick_spec(tick, env), &setup.paths)
         .map_err(|error| format!("cannot start: {error}"))?;
     Ok(tokio::select! {
         status = process.wait() => match status {
-            Ok(status) => Tick::Done(TickResult::classify(status.code(), status.signal(), false)),
+            Ok(status) => Tick::Done(TickResult::classify(status.code(), status.signal(), false, tick.lock_held)),
             Err(error) => return Err(format!("could not be waited on: {error}")),
         },
-        () = sleep(TICK_LIMIT) => {
-            let _ = process.stop(TICK_GRACE).await;
+        () = sleep(tick.limit) => {
+            let _ = process.stop(tick.grace).await;
             Tick::Done(TickResult::TimedOut)
         }
         () = stop_requested(stop) => {
@@ -223,16 +229,22 @@ async fn run_tick(setup: &WorkerSetup, stop: &mut watch::Receiver<bool>) -> Resu
     })
 }
 
+fn tick_spec(tick: &TickUnit, env: &Arc<BTreeMap<String, String>>) -> ProcessSpec {
+    spec(tick.row, &tick.program, &tick.args, env)
+}
+
 async fn dispatch_timer(
     setup: Arc<WorkerSetup>,
     board: Arc<StatusBoard>,
+    tick: TickUnit,
+    env: Arc<BTreeMap<String, String>>,
     mut stop: watch::Receiver<bool>,
 ) {
     loop {
-        match run_tick(&setup, &mut stop).await {
+        match run_tick(&setup, &tick, &env, &mut stop).await {
             Ok(Tick::Stopped) => return,
             Ok(Tick::Done(result)) => {
-                board.set(DISPATCH, Status::Note(result.label(&clock())));
+                board.set(DISPATCH, Status::Note(result.label(&clock(), tick.limit)));
                 if let Some(status) = worker_note(&result, &setup.paths.log_file(DISPATCH)) {
                     board.set(WORKER, status);
                 }
@@ -240,7 +252,7 @@ async fn dispatch_timer(
             Err(reason) => board.set(DISPATCH, Status::Note(format!("{reason} at {}", clock()))),
         }
         tokio::select! {
-            () = sleep(TICK_EVERY) => {}
+            () = sleep(tick.every) => {}
             () = stop_requested(&mut stop) => return,
         }
     }
@@ -263,32 +275,53 @@ mod tests {
         ];
         for (code, signal, timed_out, expected) in table {
             assert_eq!(
-                TickResult::classify(code, signal, timed_out),
+                TickResult::classify(code, signal, timed_out, 75),
                 expected,
                 "code {code:?} signal {signal:?} timed_out {timed_out}"
             );
         }
+        assert_eq!(
+            TickResult::classify(Some(75), None, false, 11),
+            TickResult::Failed(75)
+        );
+        assert_eq!(
+            TickResult::classify(Some(11), None, false, 11),
+            TickResult::LockHeld
+        );
     }
 
     #[test]
-    fn the_tick_runs_the_dispatcher_under_the_lock_in_the_worker_run_directory() {
-        let setup = WorkerSetup {
-            paths: AppPaths::new("/app"),
-            board: PathBuf::from("/app/worker/bin/board"),
-            env: BTreeMap::new(),
-            lockf: PathBuf::from("/usr/bin/lockf"),
+    fn the_tick_runs_the_program_and_arguments_the_units_name() {
+        let tick = TickUnit {
+            row: DISPATCH,
+            program: "/usr/bin/lockf".into(),
+            args: [
+                "-s",
+                "-t",
+                "0",
+                "/run/dispatch.lock",
+                "/cli/board",
+                "internal",
+                "dispatch",
+            ]
+            .map(String::from)
+            .to_vec(),
+            every: Duration::from_secs(120),
+            limit: Duration::from_secs(110),
+            grace: Duration::from_secs(10),
+            lock_held: 75,
         };
-        let spec = setup.tick_spec();
-        let line: Vec<String> = std::iter::once(spec.program.to_string_lossy().into_owned())
-            .chain(
-                spec.args
-                    .iter()
-                    .map(|arg| arg.to_string_lossy().into_owned()),
-            )
-            .collect();
+        let env = Arc::new(BTreeMap::from([("PATH".to_owned(), "/bin".to_owned())]));
+
+        let spec = tick_spec(&tick, &env);
+
+        assert_eq!(spec.name, DISPATCH);
+        assert_eq!(spec.program, PathBuf::from("/usr/bin/lockf"));
+        let args: Vec<_> = spec.args.iter().map(|arg| arg.to_string_lossy()).collect();
         assert_eq!(
-            line.join(" "),
-            "/usr/bin/lockf -s -t 0 /app/worker/run/agent-board-dispatch.lock /app/worker/bin/board internal dispatch"
+            args.join(" "),
+            "-s -t 0 /run/dispatch.lock /cli/board internal dispatch"
         );
+        assert_eq!(spec.env, *env);
     }
 }

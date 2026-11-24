@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -7,15 +9,22 @@ use tokio::time::timeout;
 
 use super::processes::WorkerSetup;
 use crate::supervisor::orphans::{observe, Observed};
-use crate::supervisor::process::{signal_group, RunningProcess};
+use crate::supervisor::process::{signal_group, ProcessSpec, RunningProcess};
 
 const SHUTDOWN: &str = "worker-shutdown";
 const REPORT_MARGIN: Duration = Duration::from_secs(15);
 
 /// The backend and the proxy must still be up: each worker reports its run as paused to the board before it exits.
-pub async fn pause_runs(setup: &WorkerSetup, grace: Duration) {
+pub async fn pause_runs(setup: &WorkerSetup, env: &BTreeMap<String, String>, grace: Duration) {
     let seconds = grace.as_secs().to_string();
-    let spec = setup.spec(SHUTDOWN, &["internal", "shutdown", "--grace", &seconds]);
+    let spec = ProcessSpec {
+        name: SHUTDOWN,
+        program: setup.board.clone(),
+        args: ["internal", "shutdown", "--grace", &seconds]
+            .map(OsString::from)
+            .to_vec(),
+        env: env.clone(),
+    };
     let Ok(mut process) = RunningProcess::spawn(&spec, &setup.paths) else {
         return;
     };

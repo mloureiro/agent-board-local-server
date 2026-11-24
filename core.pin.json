@@ -1,6 +1,6 @@
 {
   "repository": "mloureiro/agent-board",
-  "commit": "d2e025313168bf2afbc648cfa961e533dce4cbfa",
+  "commit": "e1f0dcde7b934f85230a0fcfdd7b566f2b989fb9",
   "branch": "local-server-v2",
   "includes": [
     {
@@ -37,7 +37,22 @@
       "branch": "feat/agent-board-local-server-x3q/allowed-hosts",
       "why": "refuses requests whose Host is not the proxy's, so a page cannot reach the no-login backend by DNS rebinding",
       "commit": "c8853c746480e0e2a6b8648734b96c570cb1afb7"
+    },
+    {
+      "branch": "feat/agent-board-local-server-9eq/worker-units",
+      "why": "adds board internal units, which prints the worker units board setup writes as JSON, so the app runs the same dispatch tick, listener and watch",
+      "commit": "e4136d18dfe7889d702cf03af9c1881a34ca328f"
+    },
+    {
+      "branch": "fix/task-badges-wake-race",
+      "why": "freezes the clock in the TaskBadges and TaskCard tests so a rounding race no longer fails them (test-only)",
+      "commit": "26ac82891ce5437d5a92a7c07e128f57d4fea58a"
+    },
+    {
+      "branch": "fix/new-task-tests-under-load",
+      "why": "sets the New task fields with one change event so the tests no longer time out under load (test-only)",
+      "commit": "3ee506b55d72fbef2f68d0b93731eeed2ff166be"
     }
   ],
-  "reason": "The fork's local-server-v2 branch is the fork's main (3a546ec) plus the included branches, changes a single-machine server needs that upstream does not have yet. local-server stays at the pre-login pin b587c6a."
+  "reason": "The fork local-server-v2 branch is still the fork main base 3a546ec plus the included branches, changes a single-machine server needs that upstream does not have yet. local-server stays at the pre-login pin b587c6a."
 }

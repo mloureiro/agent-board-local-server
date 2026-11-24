@@ -14,7 +14,7 @@ use crate::paths::{AppPaths, Resources, Sidecars};
 use crate::runtime::{self, Config, Running, WorkerConfig};
 use crate::secrets::Keychain;
 use crate::supervisor::StatusBoard;
-use crate::tray::{first_failing, handle_click, show_health, TrayMenu, QUIT};
+use crate::tray::{first_failing, handle_click, show_health, HealthMark, TrayMenu, QUIT};
 
 fn login_name() -> String {
     std::env::var("USER").unwrap_or_else(|_| "user".into())
@@ -87,16 +87,14 @@ pub fn run() {
             let mut busy = activity.subscribe();
             let reader = board.clone();
             tauri::async_runtime::spawn(async move {
-                let mut shown = None;
+                let mut mark = HealthMark::default();
                 loop {
                     // The borrow holds the channel's read lock; refresh waits on the main thread, which can be
                     // sending on the same channel (Quit), so the lock must be released before it.
                     let working = busy.borrow_and_update().is_some();
                     tray_menu.refresh(&reader, working);
-                    let failing = first_failing(&reader);
-                    if failing != shown {
+                    if let Some(failing) = mark.update(first_failing(&reader)) {
                         show_health(&tray_icon, failing.as_deref());
-                        shown = failing;
                     }
                     let alive = tokio::select! {
                         changed = changes.changed() => changed.is_ok(),

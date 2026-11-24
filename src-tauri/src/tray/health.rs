@@ -16,9 +16,32 @@ pub fn first_failing(board: &StatusBoard) -> Option<String> {
     })
 }
 
+fn presentation(failing: Option<&str>) -> (Option<&'static str>, &str) {
+    (
+        failing.map(|_| FAILING_MARK),
+        failing.unwrap_or(IDLE_TOOLTIP),
+    )
+}
+
 pub fn show(icon: &TrayIcon<Wry>, failing: Option<&str>) {
-    let _ = icon.set_title(failing.map(|_| FAILING_MARK));
-    let _ = icon.set_tooltip(Some(failing.unwrap_or(IDLE_TOOLTIP)));
+    let (title, tooltip) = presentation(failing);
+    let _ = icon.set_title(title);
+    let _ = icon.set_tooltip(Some(tooltip));
+}
+
+#[derive(Default)]
+pub struct HealthMark {
+    shown: Option<String>,
+}
+
+impl HealthMark {
+    pub fn update(&mut self, failing: Option<String>) -> Option<&Option<String>> {
+        if failing == self.shown {
+            return None;
+        }
+        self.shown = failing;
+        Some(&self.shown)
+    }
 }
 
 #[cfg(test)]
@@ -33,6 +56,31 @@ mod tests {
         Status::Blocked {
             reason: reason.into(),
         }
+    }
+
+    #[test]
+    fn a_failing_row_gives_the_mark_and_its_own_line_and_a_healthy_board_gives_the_idle_tooltip() {
+        assert_eq!(
+            presentation(Some("Worker: error")),
+            (Some("!"), "Worker: error")
+        );
+        assert_eq!(presentation(None), (None, IDLE_TOOLTIP));
+    }
+
+    #[test]
+    fn the_mark_updates_only_when_the_failing_row_changes() {
+        let mut mark = HealthMark::default();
+        let failing = || Some("Backend: crashed".to_string());
+
+        assert_eq!(mark.update(None), None);
+        assert_eq!(mark.update(failing()), Some(&failing()));
+        assert_eq!(mark.update(failing()), None);
+        assert_eq!(
+            mark.update(Some("Proxy: blocked".into())),
+            Some(&Some("Proxy: blocked".to_string()))
+        );
+        assert_eq!(mark.update(None), Some(&None));
+        assert_eq!(mark.update(None), None);
     }
 
     #[test]

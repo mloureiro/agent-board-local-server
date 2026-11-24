@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -23,6 +24,7 @@ import {
   type CoreBuild,
 } from './core-build-plan.ts';
 import { parseCorePin } from './core-pin.ts';
+import { parseKnownUnits, workerUnitsError } from './core-worker-units.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const tauriDir = join(root, 'src-tauri');
@@ -108,6 +110,38 @@ function stage(stageDir: string, coreDir: string, serverBinary: string, cliBinar
     run('codesign', ['--force', '--sign', '-', join(stageDir, binary)], root);
 }
 
+// A build of another pin (--pin) stages an older core for the upgrade smoke test, which predates `internal units`.
+function checkWorkerUnits(stageDir: string): void {
+  const scratch = mkdtempSync(join(tmpdir(), 'worker-units-'));
+  try {
+    const result = spawnSync(join(stageDir, stagedBinaries.cli), ['internal', 'units'], {
+      encoding: 'utf8',
+      timeout: 30_000,
+      env: {
+        HOME: scratch,
+        AGENT_BOARD_CONFIG_DIR: join(scratch, 'config'),
+        AGENT_BOARD_STATE_DIR: join(scratch, 'state'),
+        AGENT_BOARD_RUN_DIR: join(scratch, 'run'),
+        PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+      },
+    });
+    const excerpt = (result.stderr || result.stdout || String(result.error ?? '')).trim().slice(0, 500);
+    if (result.status !== 0) throw new Error(`board internal units did not run (exit ${result.status}): ${excerpt}`);
+    let printed: unknown;
+    try {
+      printed = JSON.parse(result.stdout);
+    } catch {
+      throw new Error(`board internal units did not print JSON: ${result.stdout.trim().slice(0, 500)}`);
+    }
+    const known = parseKnownUnits(JSON.parse(readFileSync(join(root, 'core.worker-units.json'), 'utf8')));
+    const problem = workerUnitsError(printed, known);
+    if (problem !== null) throw new Error(problem);
+    console.log(`Checked the worker units: ${known.units.join(', ')} (schema ${known.schemas.join(', ')})`);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 function main(): void {
   const args = parseBuildArgs(process.argv.slice(2));
   const pinFile = args.pin === null ? join(root, 'core.pin.json') : resolve(args.pin);
@@ -141,6 +175,7 @@ function main(): void {
     } else {
       console.log(`The core at ${pin.commit} is already built and staged`);
     }
+    if (args.pin === null) checkWorkerUnits(stageDir);
     return;
   }
 
@@ -189,6 +224,7 @@ function main(): void {
   };
   writeFileSync(join(stageDir, BUILD_MANIFEST), `${JSON.stringify(build, null, 2)}\n`);
   console.log(`Staged the core at ${pin.commit}`);
+  if (args.pin === null) checkWorkerUnits(stageDir);
 }
 
 main();

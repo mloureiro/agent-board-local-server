@@ -78,11 +78,68 @@ pub struct Handle {
     backend_task: JoinHandle<()>,
     worker: Option<Arc<WorkerControl>>,
     settings: Settings,
-    backups_dir: PathBuf,
-    app_log: LogFile,
+    link: BackendLink,
     proxy_setup: ProxySetup,
     board: Arc<StatusBoard>,
+}
+
+/// What the backend actions need, copied out of the slot so that a long action does not hold it.
+#[derive(Clone)]
+struct BackendLink {
+    commands: mpsc::Sender<Command>,
+    board: Arc<StatusBoard>,
     activity: Arc<Activity>,
+    app_log: LogFile,
+    data_dir: PathBuf,
+    backups_dir: PathBuf,
+}
+
+impl BackendLink {
+    async fn back_up_now(&self) -> Result<PathBuf, ActionError> {
+        let _gate = begin(&self.activity, Kind::Backup)?;
+        let no_backend = || ActionError::Failed("the backend is not running".into());
+        if !matches!(self.board.get(BACKEND), Some(Status::Running { .. })) {
+            return Err(no_backend());
+        }
+        let (held, acknowledged) = oneshot::channel();
+        let hold = Command::Hold {
+            note: "backing up".into(),
+            held,
+        };
+        self.commands.send(hold).await.map_err(|_| no_backend())?;
+        acknowledged.await.map_err(|_| no_backend())?;
+
+        let data_dir = self.data_dir.clone();
+        let backups_dir = self.backups_dir.clone();
+        let log = self.app_log.clone();
+        let copied = tokio::task::spawn_blocking(move || {
+            backup::manual(&data_dir, &backups_dir, &localtime::compact(), &log)
+        })
+        .await
+        .unwrap_or_else(|error| Err(error.to_string()));
+        let _ = self.commands.send(Command::Resume).await;
+
+        match copied {
+            Ok(path) => {
+                self.board.set(BACKUP, Status::Note(localtime::clock()));
+                Ok(path)
+            }
+            Err(reason) => {
+                self.board
+                    .set(BACKUP, Status::Note(format!("failed ({reason})")));
+                Err(ActionError::Failed(reason))
+            }
+        }
+    }
+
+    async fn restart(&self) -> Result<Guard, ActionError> {
+        let gate = begin(&self.activity, Kind::Recovery)?;
+        self.commands
+            .send(Command::Restart)
+            .await
+            .map_err(|_| ActionError::Failed("this run has no backend to restart".into()))?;
+        Ok(gate)
+    }
 }
 
 impl Handle {
@@ -102,53 +159,11 @@ impl Handle {
     }
 
     pub async fn back_up_now(&self) -> Result<PathBuf, ActionError> {
-        let _gate = begin(&self.activity, Kind::Backup)?;
-        let no_backend = || ActionError::Failed("the backend is not running".into());
-        if !matches!(self.board.get(BACKEND), Some(Status::Running { .. })) {
-            return Err(no_backend());
-        }
-        let (held, acknowledged) = oneshot::channel();
-        let hold = Command::Hold {
-            note: "backing up".into(),
-            held,
-        };
-        self.backend
-            .commands
-            .send(hold)
-            .await
-            .map_err(|_| no_backend())?;
-        acknowledged.await.map_err(|_| no_backend())?;
-
-        let data_dir = self.settings.data_dir.clone();
-        let backups_dir = self.backups_dir.clone();
-        let log = self.app_log.clone();
-        let copied = tokio::task::spawn_blocking(move || {
-            backup::manual(&data_dir, &backups_dir, &localtime::compact(), &log)
-        })
-        .await
-        .unwrap_or_else(|error| Err(error.to_string()));
-        let _ = self.backend.commands.send(Command::Resume).await;
-
-        match copied {
-            Ok(path) => {
-                self.board.set(BACKUP, Status::Note(localtime::clock()));
-                Ok(path)
-            }
-            Err(reason) => {
-                self.board
-                    .set(BACKUP, Status::Note(format!("failed ({reason})")));
-                Err(ActionError::Failed(reason))
-            }
-        }
+        self.link.back_up_now().await
     }
 
     pub async fn restart_server(&mut self) -> Result<(), ActionError> {
-        let _gate = begin(&self.activity, Kind::Recovery)?;
-        self.backend
-            .commands
-            .send(Command::Restart)
-            .await
-            .map_err(|_| ActionError::Failed("this run has no backend to restart".into()))?;
+        let _gate = self.link.restart().await?;
         let proxy = self.board.get(PROXY);
         if proxy_needs_restart(proxy.as_ref(), self.proxy_task.is_finished()) {
             self.proxy_task = tokio::spawn(serve_proxy(
@@ -195,11 +210,15 @@ pub async fn restart_server(running: &Running) -> Result<(), ActionError> {
     }
 }
 
-pub async fn back_up_now(running: &Running) -> Result<PathBuf, ActionError> {
+async fn link_of(running: &Running) -> Result<BackendLink, ActionError> {
     match running.lock().await.as_ref() {
-        Some(handle) => handle.back_up_now().await,
+        Some(handle) => Ok(handle.link.clone()),
         None => Err(ActionError::Failed("the app is not running".into())),
     }
+}
+
+pub async fn back_up_now(running: &Running) -> Result<PathBuf, ActionError> {
+    link_of(running).await?.back_up_now().await
 }
 
 pub async fn restart_worker(running: &Running) -> Result<(), ActionError> {
@@ -276,8 +295,15 @@ pub async fn start(
         Some(worker) => tokio::spawn(run_worker(worker.clone(), board.clone(), worker_stopped)),
         None => tokio::spawn(async {}),
     };
-    let backups_dir = settings.backups_dir(&config.paths);
-    let app_log_path = config.paths.log_file("app");
+    let link = BackendLink {
+        commands: backend.commands.clone(),
+        board: board.clone(),
+        activity,
+        app_log: LogFile::new(config.paths.log_file("app")),
+        data_dir: settings.data_dir.clone(),
+        backups_dir: settings.backups_dir(&config.paths),
+    };
+    let backups_dir = link.backups_dir.clone();
     let backend_task = if config.upstream_override.is_some() {
         tokio::spawn(async {})
     } else {
@@ -313,11 +339,9 @@ pub async fn start(
         backend_task,
         worker,
         settings,
-        backups_dir,
-        app_log: LogFile::new(app_log_path),
+        link,
         proxy_setup,
         board,
-        activity,
     })
 }
 
@@ -677,6 +701,108 @@ mod tests {
 
         assert_eq!(launches.load(Ordering::SeqCst), 0);
         assert_eq!(board.get(BACKEND), Some(Status::Stopped));
+    }
+
+    struct Rig {
+        link: BackendLink,
+        commands: mpsc::Receiver<Command>,
+        control: Option<Control>,
+        _dir: tempfile::TempDir,
+    }
+
+    fn rig() -> Rig {
+        let dir = tempfile::tempdir().unwrap();
+        let (control, _stopped, commands) = Control::new();
+        let board = Arc::new(StatusBoard::default());
+        board.set(BACKEND, Status::Running { port: 4000 });
+        let link = BackendLink {
+            commands: control.commands.clone(),
+            board,
+            activity: Arc::new(Activity::default()),
+            app_log: LogFile::new(dir.path().join("app.log")),
+            data_dir: dir.path().join("data"),
+            backups_dir: dir.path().join("backups"),
+        };
+        Rig {
+            link,
+            commands,
+            control: Some(control),
+            _dir: dir,
+        }
+    }
+
+    fn handle_with(rig: &mut Rig) -> Handle {
+        let (stop_worker, _) = watch::channel(false);
+        let (stop_proxy, _) = watch::channel(false);
+        let (stop_status, _) = watch::channel(false);
+        Handle {
+            stop_worker,
+            stop_proxy,
+            backend: rig.control.take().unwrap(),
+            stop_status,
+            status_task: tokio::spawn(async {}),
+            worker_task: tokio::spawn(async {}),
+            proxy_task: tokio::spawn(async {}),
+            backend_task: tokio::spawn(async {}),
+            worker: None,
+            settings: Settings {
+                user_name: "tester".into(),
+                data_dir: rig.link.data_dir.clone(),
+                port: 4785,
+                start_at_login: false,
+                worker_path: Vec::new(),
+                backup_dir: None,
+            },
+            link: rig.link.clone(),
+            proxy_setup: ProxySetup {
+                port: 4785,
+                frontend: PathBuf::new(),
+                log: LogFile::new(rig.link.backups_dir.join("proxy.log")),
+                upstream_override: None,
+            },
+            board: rig.link.board.clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_sends_the_restart_command_once_the_gate_is_taken() {
+        let mut rig = rig();
+
+        let gate = rig.link.restart().await;
+
+        assert!(gate.is_ok());
+        assert!(matches!(rig.commands.try_recv(), Ok(Command::Restart)));
+    }
+
+    #[tokio::test]
+    async fn restart_and_a_second_backup_are_refused_while_a_backup_holds_the_gate() {
+        let mut rig = rig();
+        let _backing_up = rig.link.activity.begin(Kind::Backup).unwrap();
+
+        let restart = rig.link.restart().await;
+        let backup = rig.link.back_up_now().await;
+
+        assert!(matches!(restart, Err(ActionError::Busy(Kind::Backup))));
+        assert!(matches!(backup, Err(ActionError::Busy(Kind::Backup))));
+        assert!(rig.commands.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn the_slot_is_free_while_a_backup_waits_for_the_backend_to_hold() {
+        let mut rig = rig();
+        let running: Running = Arc::new(tokio::sync::Mutex::new(Some(handle_with(&mut rig))));
+
+        let backing_up = tokio::spawn({
+            let running = running.clone();
+            async move { back_up_now(&running).await }
+        });
+        let hold = tokio::time::timeout(Duration::from_secs(10), rig.commands.recv())
+            .await
+            .expect("the backup never asked the backend to hold");
+
+        assert!(matches!(hold, Some(Command::Hold { .. })));
+        assert!(running.try_lock().is_ok());
+        backing_up.abort();
     }
 
     #[test]

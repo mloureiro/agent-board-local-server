@@ -238,11 +238,16 @@ fn hold_lock(
     home: Option<&Path>,
 ) -> Result<(bool, Option<lock::Lock>), io::Error> {
     let refused = delete_data && refusal(root, home).is_some();
-    if refused || !root.exists() {
+    if !root.exists() {
         return Ok((false, None));
     }
-    match lock::acquire(&paths.lock_file()) {
-        Ok(held) => Ok((false, Some(held))),
+    let taken = if refused {
+        lock::acquire_existing(&paths.lock_file())
+    } else {
+        lock::acquire(&paths.lock_file()).map(Some)
+    };
+    match taken {
+        Ok(held) => Ok((false, held)),
         Err(LockError::AlreadyRunning) => Ok((true, None)),
         Err(LockError::Io(error)) => Err(error),
     }
@@ -558,6 +563,23 @@ mod tests {
     }
 
     #[test]
+    fn the_leftover_proxy_secret_of_an_earlier_build_is_deleted() {
+        let store = MemoryStore::default();
+        store.set("proxy-secret", "old").unwrap();
+        let agents = tempfile::tempdir().unwrap();
+        let env = Env {
+            launch_agents: agents.path(),
+            store: &store,
+            boot_out: &|| {},
+        };
+
+        let report = execute(&[Step::DeleteKeychainItems], &env);
+
+        assert!(report.ok);
+        assert_eq!(store.get("proxy-secret").unwrap(), None);
+    }
+
+    #[test]
     fn a_failed_keychain_delete_is_reported_and_fails_the_run() {
         let store = crate::secrets::testing::DeletesFailWhenArmed::default();
         store.arm();
@@ -613,6 +635,35 @@ mod tests {
         let accepted = hold_lock(&paths, &root, true, Some(&home)).unwrap();
         assert!(accepted.1.is_some());
         assert!(paths.lock_file().exists());
+    }
+
+    #[test]
+    fn a_refused_root_whose_app_holds_the_lock_reports_running_without_a_new_file() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("app");
+        fs::create_dir_all(&root).unwrap();
+        let paths = AppPaths::new(&root);
+        let home = scratch.path().join("home");
+        let _running = lock::acquire(&paths.lock_file()).unwrap();
+
+        let (running, held) = hold_lock(&paths, &root, true, Some(&home)).unwrap();
+
+        assert!(running);
+        assert!(held.is_none());
+    }
+
+    #[test]
+    fn a_refused_root_with_a_free_lock_file_is_not_running() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("app");
+        fs::create_dir_all(&root).unwrap();
+        let paths = AppPaths::new(&root);
+        drop(lock::acquire(&paths.lock_file()).unwrap());
+
+        let (running, _) =
+            hold_lock(&paths, &root, true, Some(&scratch.path().join("home"))).unwrap();
+
+        assert!(!running);
     }
 
     fn real_home() -> PathBuf {

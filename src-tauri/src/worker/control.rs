@@ -6,7 +6,10 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 use super::check;
-use super::credentials::{discard_pending, enrolled, forget, promote_pending, Pair};
+use super::credentials::{
+    discard_pending, enrolled, forget, promote_pending, read_enrolled, restore_enrolled, Pair,
+    PromoteFailure,
+};
 use super::enrol::{validate, BoardInit, EnrolError, InitReport, InitRunner};
 use super::layout;
 use super::processes::{Processes, WorkerSetup};
@@ -133,9 +136,10 @@ impl WorkerControl {
         bundled_board: &std::path::Path,
         app_executable: &std::path::Path,
     ) -> Result<(), String> {
-        layout::ensure(&self.host.setup.paths, bundled_board, app_executable)
-            .map_err(|error| error.to_string())?;
-        discard_pending(self.secrets.as_ref()).map_err(|error| error.to_string())
+        let laid_out = layout::ensure(&self.host.setup.paths, bundled_board, app_executable)
+            .map_err(|error| error.to_string());
+        let discarded = discard_pending(self.secrets.as_ref()).map_err(|error| error.to_string());
+        laid_out.and(discarded)
     }
 
     pub fn check_log(&self) -> std::path::PathBuf {
@@ -222,20 +226,64 @@ impl<H: Host, I: InitRunner> WorkerControl<H, I> {
         };
         let InitReport { machine } =
             validate(self.secrets.as_ref(), &self.init, &url, token, data_key).await?;
-        if state.started {
+        let previous = read_enrolled(self.secrets.as_ref())?;
+        let was_started = state.started;
+        if was_started {
             self.host.stop_processes().await;
             state.started = false;
         }
         self.host.pause_runs(START_PAUSE_GRACE).await;
-        if let Err(error) = promote_pending(self.secrets.as_ref()) {
-            let _ = discard_pending(self.secrets.as_ref());
-            self.blocked(error.to_string());
-            return Err(error.into());
+        match promote_pending(self.secrets.as_ref()) {
+            Ok(()) | Err(PromoteFailure::Discard(_)) => {}
+            Err(PromoteFailure::Token(error)) => {
+                return self
+                    .abandon_promotion(&mut state, was_started, error.to_string())
+                    .await;
+            }
+            Err(PromoteFailure::DataKey(error)) => {
+                if let Err(undo) = self.restore(previous.as_ref()) {
+                    let message =
+                        format!("{error}; the previous pair could not be restored ({undo})");
+                    self.blocked(message.clone());
+                    return Err(EnrolError::new(message));
+                }
+                return self
+                    .abandon_promotion(&mut state, was_started, error.to_string())
+                    .await;
+            }
         }
         self.host.start_processes().await;
         state.started = true;
         state.runs_possible = true;
         Ok(Enrolled { machine })
+    }
+
+    fn restore(
+        &self,
+        previous: Option<&super::credentials::Credentials>,
+    ) -> Result<(), SecretError> {
+        match previous {
+            Some(pair) => restore_enrolled(self.secrets.as_ref(), pair),
+            None => {
+                forget(self.secrets.as_ref())?;
+                self.board.set(WORKER_LISTEN, Status::NotConnected);
+                Ok(())
+            }
+        }
+    }
+
+    async fn abandon_promotion(
+        &self,
+        state: &mut State,
+        was_started: bool,
+        message: String,
+    ) -> Result<Enrolled, EnrolError> {
+        let _ = discard_pending(self.secrets.as_ref());
+        if was_started {
+            self.host.start_processes().await;
+            state.started = true;
+        }
+        Err(EnrolError::new(message))
     }
 
     pub async fn restart(&self) -> Result<(), ActionError> {
@@ -300,8 +348,11 @@ mod tests {
     use std::time::Duration;
 
     use crate::paths::AppPaths;
+    use crate::secrets::testing::FailsAtCall;
     use crate::secrets::MemoryStore;
-    use crate::worker::credentials::{pending_present, DATA_KEY_ACCOUNT, TOKEN_ACCOUNT};
+    use crate::worker::credentials::{
+        pending_present, write_pending, DATA_KEY_ACCOUNT, TOKEN_ACCOUNT,
+    };
 
     use super::*;
 
@@ -587,6 +638,203 @@ mod tests {
 
         assert_eq!(seen(&rig), ["stop", "kill"]);
     }
+
+    fn failing_store(old_pair: bool) -> Arc<FailsAtCall> {
+        let store = Arc::new(FailsAtCall::default());
+        if old_pair {
+            store.set(TOKEN_ACCOUNT, "abm_old").unwrap();
+            store.set(DATA_KEY_ACCOUNT, "abk1_old").unwrap();
+        }
+        store
+    }
+
+    fn enrolled_pair(rig: &Rig) -> (Option<String>, Option<String>) {
+        (
+            rig.store.get(TOKEN_ACCOUNT).unwrap(),
+            rig.store.get(DATA_KEY_ACCOUNT).unwrap(),
+        )
+    }
+
+    fn old_pair() -> (Option<String>, Option<String>) {
+        (Some("abm_old".into()), Some("abk1_old".into()))
+    }
+
+    #[tokio::test]
+    async fn a_failed_token_write_discards_the_pending_pair_and_restarts_the_worker_on_the_old_one()
+    {
+        let store = failing_store(true);
+        let rig = rig(Init::Accepts, store.clone());
+        started(&rig).await;
+        store.count_from_here(&[3], &[]);
+
+        rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
+
+        assert_eq!(seen(&rig), ["init", "stop", "pause", "start"]);
+        assert_eq!(enrolled_pair(&rig), old_pair());
+        assert!(!pending_present(rig.store.as_ref()).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_failed_token_write_with_no_worker_running_starts_nothing() {
+        let store = failing_store(false);
+        let rig = rig(Init::Accepts, store.clone());
+        rig.control.proxy_ready().await;
+        rig.events.lock().unwrap().clear();
+        store.count_from_here(&[3], &[]);
+
+        rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
+
+        assert_eq!(seen(&rig), ["init", "pause"]);
+        assert_eq!(enrolled_pair(&rig), (None, None));
+        assert!(!pending_present(rig.store.as_ref()).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_failed_data_key_write_restores_the_old_pair_discards_the_pending_one_and_restarts() {
+        let store = failing_store(true);
+        let rig = rig(Init::Accepts, store.clone());
+        started(&rig).await;
+        store.count_from_here(&[4], &[]);
+
+        rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
+
+        assert_eq!(seen(&rig), ["init", "stop", "pause", "start"]);
+        assert_eq!(enrolled_pair(&rig), old_pair());
+        assert!(!pending_present(rig.store.as_ref()).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_failed_data_key_write_with_no_old_pair_forgets_the_partial_one_and_shows_not_connected(
+    ) {
+        let store = failing_store(false);
+        let rig = rig(Init::Accepts, store.clone());
+        rig.control.proxy_ready().await;
+        rig.events.lock().unwrap().clear();
+        store.count_from_here(&[4], &[]);
+
+        rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
+
+        assert_eq!(seen(&rig), ["init", "pause"]);
+        assert_eq!(enrolled_pair(&rig), (None, None));
+        assert!(!pending_present(rig.store.as_ref()).unwrap());
+        assert_eq!(rig.board.get(WORKER_LISTEN), Some(Status::NotConnected));
+    }
+
+    #[tokio::test]
+    async fn a_failed_restore_blocks_the_worker_and_leaves_it_stopped() {
+        let store = failing_store(true);
+        let rig = rig(Init::Accepts, store.clone());
+        started(&rig).await;
+        store.count_from_here(&[4, 5], &[]);
+
+        rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
+
+        assert_eq!(seen(&rig), ["init", "stop", "pause"]);
+        assert!(matches!(
+            rig.board.get(WORKER_LISTEN),
+            Some(Status::Blocked { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_forget_after_a_partial_write_blocks_the_worker_and_leaves_it_stopped() {
+        let store = failing_store(false);
+        let rig = rig(Init::Accepts, store.clone());
+        rig.control.proxy_ready().await;
+        rig.events.lock().unwrap().clear();
+        store.count_from_here(&[4], &[3]);
+
+        rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
+
+        assert_eq!(seen(&rig), ["init", "pause"]);
+        assert!(matches!(
+            rig.board.get(WORKER_LISTEN),
+            Some(Status::Blocked { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_pending_discard_still_starts_the_worker_and_reports_the_enrolment() {
+        let store = failing_store(true);
+        let rig = rig(Init::Accepts, store.clone());
+        started(&rig).await;
+        store.count_from_here(&[], &[3]);
+
+        let done = rig.control.enrol("abm_new", "abk1_new").await.unwrap();
+
+        assert_eq!(done.machine.as_deref(), Some("tnk_one"));
+        assert_eq!(seen(&rig), ["init", "stop", "pause", "start"]);
+        assert_eq!(
+            enrolled_pair(&rig),
+            (Some("abm_new".into()), Some("abk1_new".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_old_pair_fails_the_enrolment_before_anything_is_stopped() {
+        struct UnreadableEnrolled(MemoryStore);
+        impl SecretStore for UnreadableEnrolled {
+            fn get(&self, account: &str) -> Result<Option<String>, SecretError> {
+                if account == TOKEN_ACCOUNT {
+                    return Err(SecretError("locked".into()));
+                }
+                self.0.get(account)
+            }
+            fn set(&self, account: &str, value: &str) -> Result<(), SecretError> {
+                self.0.set(account, value)
+            }
+            fn delete(&self, account: &str) -> Result<(), SecretError> {
+                self.0.delete(account)
+            }
+        }
+        let rig = rig(
+            Init::Accepts,
+            Arc::new(UnreadableEnrolled(MemoryStore::default())),
+        );
+        rig.board.set(WORKER_LISTEN, Status::NotConnected);
+
+        rig.control.enrol("abm_new", "abk1_new").await.unwrap_err();
+
+        assert_eq!(seen(&rig), ["init"]);
+    }
+
+    #[test]
+    fn prepare_discards_a_leftover_pending_pair_even_when_the_layout_cannot_be_written() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(root.path());
+        std::fs::create_dir_all(paths.worker_bin_dir().parent().unwrap()).unwrap();
+        let worker_dir = paths.worker_bin_dir().parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&worker_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let store = Arc::new(MemoryStore::default());
+        write_pending(
+            store.as_ref(),
+            &super::super::credentials::Credentials {
+                token: "abm_new".into(),
+                data_key: "abk1_new".into(),
+            },
+        )
+        .unwrap();
+        let control = WorkerControl::new(
+            WorkerSetup {
+                paths,
+                board: PathBuf::new(),
+                env: BTreeMap::new(),
+                lockf: PathBuf::new(),
+            },
+            store.clone(),
+            Arc::new(StatusBoard::default()),
+            Arc::new(Activity::default()),
+        );
+
+        let result = control.prepare(Path::new("/board"), Path::new("/app"));
+
+        std::fs::set_permissions(&worker_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err());
+        assert!(!pending_present(store.as_ref()).unwrap());
+    }
+
     #[tokio::test]
     async fn a_moved_proxy_port_reruns_board_init_before_the_worker_starts() {
         let rig = rig_with_web_json(Init::Accepts, enrolled_store(), "http://127.0.0.1:4790");

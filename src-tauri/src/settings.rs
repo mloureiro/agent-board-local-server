@@ -8,6 +8,11 @@ use serde::{Deserialize, Serialize};
 use crate::paths::{has_parent_component, is_within, AppPaths};
 
 pub const DEFAULT_PORT: u16 = 4785;
+
+pub fn login_name() -> String {
+    std::env::var("USER").unwrap_or_else(|_| "user".into())
+}
+
 const MIN_PORT: i64 = 1024;
 const MAX_PORT: i64 = 65535;
 const MAX_USER_NAME: usize = 64;

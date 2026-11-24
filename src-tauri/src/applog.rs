@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::localtime::timestamp;
 use crate::supervisor::process::{rotate_if_larger, LOG_LIMIT};
@@ -9,6 +10,7 @@ use crate::supervisor::process::{rotate_if_larger, LOG_LIMIT};
 pub struct LogFile {
     path: PathBuf,
     limit: u64,
+    writing: Arc<Mutex<()>>,
 }
 
 impl LogFile {
@@ -16,15 +18,20 @@ impl LogFile {
         Self {
             path,
             limit: LOG_LIMIT,
+            writing: Arc::default(),
         }
     }
 
-    /// A full disk or a missing folder must not take the app down through its own log.
+    /// A full disk or an unwritable folder must not take the app down through its own log.
     pub fn write(&self, line: &str) {
         let _ = self.append(line);
     }
 
     fn append(&self, line: &str) -> std::io::Result<()> {
+        let _writing = self
+            .writing
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(dir) = self.path.parent().filter(|dir| !dir.exists()) {
             fs::create_dir_all(dir)?;
         }
@@ -79,6 +86,7 @@ mod tests {
         let log = LogFile {
             path: dir.path().join("app.log"),
             limit: 10,
+            writing: Arc::default(),
         };
         log.write("a line longer than the limit");
 
@@ -88,6 +96,39 @@ mod tests {
         let previous = fs::read_to_string(dir.path().join("app.log.1")).unwrap();
         assert!(current.ends_with(" fresh\n") && current.lines().count() == 1);
         assert!(previous.contains("a line longer than the limit"));
+    }
+
+    #[test]
+    fn clones_writing_at_once_lose_no_line_to_a_double_rotation() {
+        const WRITERS: usize = 8;
+        const LINES: usize = 60;
+        let dir = tempfile::tempdir().unwrap();
+        let log = LogFile {
+            path: dir.path().join("app.log"),
+            limit: 20_000,
+            writing: Arc::default(),
+        };
+
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|_| {
+                let log = log.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..LINES {
+                        log.write(&"x".repeat(60));
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        let kept = fs::read_to_string(log.path()).unwrap().lines().count()
+            + fs::read_to_string(dir.path().join("app.log.1"))
+                .unwrap()
+                .lines()
+                .count();
+        assert_eq!(kept, WRITERS * LINES);
     }
 
     #[test]

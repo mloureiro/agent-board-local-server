@@ -37,6 +37,7 @@ pub struct Config {
     pub sidecars: Sidecars,
     pub resources: Resources,
     pub login_name: String,
+    pub app_log: LogFile,
     pub port_override: Option<u16>,
     /// Serve the proxy in front of this local port and start no backend; for tests that compare the proxy to another one.
     pub upstream_override: Option<u16>,
@@ -265,7 +266,7 @@ pub async fn start(
 
     let (stop_status, status_stopped) = watch::channel(false);
     let status_task = tokio::spawn(log_status_changes(
-        LogFile::new(config.paths.log_file("app")),
+        config.app_log.clone(),
         board.clone(),
         status_stopped,
     ));
@@ -299,7 +300,7 @@ pub async fn start(
         commands: backend.commands.clone(),
         board: board.clone(),
         activity,
-        app_log: LogFile::new(config.paths.log_file("app")),
+        app_log: config.app_log.clone(),
         data_dir: settings.data_dir.clone(),
         backups_dir: settings.backups_dir(&config.paths),
     };
@@ -312,7 +313,7 @@ pub async fn start(
             data_dir: settings.data_dir.clone(),
             backups_dir: backups_dir.clone(),
             bundled: CoreBuild::read(&config.resources.core_build()),
-            log: LogFile::new(config.paths.log_file("app")),
+            log: config.app_log.clone(),
         };
         tokio::spawn(run_backend(
             BackendLauncher {

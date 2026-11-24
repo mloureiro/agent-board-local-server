@@ -158,10 +158,7 @@ async fn run_doctor(board: &Path, env: &BTreeMap<String, String>) -> Result<Vec<
 
 pub async fn run(board: &Path, env: &BTreeMap<String, String>, log: &Path) -> usize {
     let worker_path = env.get("PATH").map_or("", String::as_str);
-    let Report {
-        mut lines,
-        problems,
-    } = match run_doctor(board, env).await {
+    let Report { lines, problems } = match run_doctor(board, env).await {
         Ok(checks) => report(checks, &dropped(), worker_path),
         Err(reason) => {
             let failure = Check::new("doctor", Level::Fail, reason);
@@ -171,12 +168,21 @@ pub async fn run(board: &Path, env: &BTreeMap<String, String>, log: &Path) -> us
             }
         }
     };
+    write_log(log, lines);
+    problems
+}
+
+pub fn fail(log: &Path, name: &str, reason: &str) -> usize {
+    write_log(log, vec![Check::new(name, Level::Fail, reason).line()]);
+    1
+}
+
+fn write_log(log: &Path, mut lines: Vec<String>) {
     lines.insert(0, format!("worker check {}", timestamp()));
     if let Some(parent) = log.parent() {
         let _ = fs::create_dir_all(parent);
     }
     let _ = fs::write(log, lines.join("\n") + "\n");
-    problems
 }
 
 pub fn summary(problems: usize) -> String {

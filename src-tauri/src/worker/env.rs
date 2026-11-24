@@ -5,38 +5,12 @@ use crate::paths::AppPaths;
 
 const INHERITED: [&str; 6] = ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG"];
 
-/// The whole environment of every worker process, built from scratch. The `PATH` is written out here because an app
-/// started from Finder has only `/usr/bin:/bin:/usr/sbin:/sbin`, where neither `claude` nor `gh` is found.
 pub fn environment(
     paths: &AppPaths,
     credentials_command: &Path,
-    worker_path: &[PathBuf],
     app_env: &dyn Fn(&str) -> Option<String>,
 ) -> BTreeMap<String, String> {
-    let home = app_env("HOME");
-    let mut path = vec![paths.worker_bin_dir().to_string_lossy().into_owned()];
-    path.extend(
-        worker_path
-            .iter()
-            .map(|entry| entry.to_string_lossy().into_owned()),
-    );
-    if let Some(home) = &home {
-        path.push(format!("{home}/.local/bin"));
-    }
-    path.extend(
-        [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/usr/sbin",
-            "/sbin",
-        ]
-        .map(String::from),
-    );
-
     let mut env = BTreeMap::from([
-        ("PATH".to_owned(), path.join(":")),
         (
             "AGENT_BOARD_CONFIG_DIR".to_owned(),
             paths.worker_config_dir().to_string_lossy().into_owned(),
@@ -59,6 +33,24 @@ pub fn environment(
             env.insert(name.to_owned(), value);
         }
     }
+    env
+}
+
+pub fn with_path(
+    base: &BTreeMap<String, String>,
+    paths: &AppPaths,
+    worker_path: &[PathBuf],
+    units_path: &str,
+) -> BTreeMap<String, String> {
+    let mut entries = vec![paths.worker_bin_dir().to_string_lossy().into_owned()];
+    entries.extend(
+        worker_path
+            .iter()
+            .map(|entry| entry.to_string_lossy().into_owned()),
+    );
+    entries.push(units_path.to_owned());
+    let mut env = base.clone();
+    env.insert("PATH".to_owned(), entries.join(":"));
     env
 }
 
@@ -89,11 +81,18 @@ mod tests {
             PathBuf::from("/Users/ines/bin"),
         ];
 
-        let env = environment(&paths, &app, &extra, &|name| {
+        let base = environment(&paths, &app, &|name| {
             host.get(name).map(|v| (*v).to_owned())
         });
+        let env = with_path(
+            &base,
+            &paths,
+            &extra,
+            "/Users/ines/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        );
 
         let root = "/Users/ines/Library/Application Support/app/worker";
+        assert!(!base.contains_key("PATH"));
         assert_eq!(
             env,
             BTreeMap::from(
@@ -101,7 +100,7 @@ mod tests {
                     (
                         "PATH",
                         format!(
-                            "{root}/bin:/opt/tools/bin:/Users/ines/bin:/Users/ines/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                            "{root}/bin:/opt/tools/bin:/Users/ines/bin:/Users/ines/.local/bin:/usr/local/bin:/usr/bin:/bin"
                         )
                     ),
                     ("AGENT_BOARD_CONFIG_DIR", format!("{root}/config")),

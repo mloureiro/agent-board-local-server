@@ -79,14 +79,14 @@ The headless runner takes `SIGUSR1` as "Back up now" and prints `backup written 
 
 ## The worker
 
-The worker is the bundled `board` CLI. The app runs `board internal listen` and `board internal watch` itself and a dispatch tick at start and every two minutes; it installs nothing with launchd. Its files sit apart from the core's defaults, under `worker/`:
+The worker is the bundled `board` CLI. The app runs the listener, the watch unit and the dispatch tick itself and installs nothing with launchd. What each runs, and the dispatch tick's interval, time limit and lock, is what `board internal units` prints: the same units `board setup` would write for launchd, so a core change to them reaches the app with the next pin. The app reads them once at every worker start (connect, reconnect, "Restart worker") and uses that reading for the pause of running cards, `board init`, "Check worker" and the three processes of that start. The restart policy and the ten-second stop wait stay the app's. If the units cannot be read (the command fails, times out or prints something this build does not know), the worker stays stopped, the tray's worker line shows `worker units: <reason>` and `logs/app.log` holds the command's output; "Restart worker" tries again. Its files sit apart from the core's defaults, under `worker/`:
 
 - `worker/config/` (`AGENT_BOARD_CONFIG_DIR`: `web.json`, `config.json`), `worker/state/` (`AGENT_BOARD_STATE_DIR`: run logs, sessions) and `worker/run/` (`AGENT_BOARD_RUN_DIR`: pid files, the dispatch lock)
 - `worker/bin/board`, a link to the bundled CLI that comes first on the worker's `PATH`
 - `worker/worker-credentials`, a link to the app's own executable. The CLI runs it as `AGENT_BOARD_CREDENTIALS_COMMAND`; it prints the enrolled token and data key from the Keychain and nothing else, so neither is ever in a file or a process argument.
 - `worker/worker-credentials-pending`, a second link to the same executable. Only the `board init` that checks a new pair is pointed at it; it prints the pair being checked and fails when there is none, so the running worker can never be served a pair the board has not accepted.
 
-The `PATH` the worker gets is written out by the app: `worker/bin`, then the directories of the `workerPath` setting in the order they are listed, then `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and the system directories. `claude` and `gh` are found when the app is started from Finder, and a tool installed elsewhere (a version manager's shims, for example) is reached by listing its directory in `workerPath`:
+The `PATH` the worker gets is `worker/bin`, then the directories of the `workerPath` setting in the order they are listed, then the `PATH` the bundled CLI gives its own launchd agents (the one in `board internal units`). `claude` and `gh` are found when the app is started from Finder, and a tool installed elsewhere (a version manager's shims, for example) is reached by listing its directory in `workerPath`:
 
 ```json
 { "workerPath": ["/Users/ines/.local/share/mise/shims"] }
